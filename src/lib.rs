@@ -23,8 +23,8 @@ pub mod rules;
 pub mod session;
 pub mod version;
 
-pub const LAUNCHER_NAME: &str = "flint";
-pub const APP_TITLE: &str = "Flint";
+pub const LAUNCHER_NAME: &str = "elo";
+pub const APP_TITLE: &str = "Elo Launcher";
 pub const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Progress events emitted by long running operations (install, download).

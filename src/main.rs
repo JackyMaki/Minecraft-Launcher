@@ -2,19 +2,19 @@
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use flint_launcher::auth::{Account, Accounts};
-use flint_launcher::manifest::VersionManifest;
-use flint_launcher::paths::Paths;
-use flint_launcher::perf::PerfPreset;
-use flint_launcher::profiles::{Loader, Profile, Profiles, QuickPlay, Resolution, Settings};
-use flint_launcher::session::{self, Overrides};
-use flint_launcher::{Progress, ProgressSink};
+use elo_launcher::auth::{Account, Accounts};
+use elo_launcher::manifest::VersionManifest;
+use elo_launcher::paths::Paths;
+use elo_launcher::perf::PerfPreset;
+use elo_launcher::profiles::{Loader, Profile, Profiles, QuickPlay, Resolution, Settings};
+use elo_launcher::session::{self, Overrides};
+use elo_launcher::{Progress, ProgressSink};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "flint", version, about = "Flint: a fast open-source Minecraft launcher", long_about = None)]
+#[command(name = "elo", version, about = "Elo Launcher: a fast open-source Minecraft launcher", long_about = None)]
 struct Cli {
     /// Game directory (defaults to the standard .minecraft folder).
     #[arg(long, global = true, env = "MC_LAUNCHER_ROOT")]
@@ -266,7 +266,7 @@ fn main() {
 fn run(cli: Cli, paths: Paths) -> Result<()> {
     let _ = std::fs::create_dir_all(paths.cache_dir());
     match cli.cmd.unwrap_or(Cmd::Gui) {
-        Cmd::Gui => flint_launcher::gui::run(paths),
+        Cmd::Gui => elo_launcher::gui::run(paths),
         Cmd::Versions {
             snapshots,
             all,
@@ -316,11 +316,11 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
             let manifest = load_manifest(&paths, false).ok();
             let mut p = Profile::new("install", &version);
             p.extra.loader = parse_loader(loader.as_deref(), fabric)?;
-            let mut opts = flint_launcher::install::InstallOptions::from(&settings);
+            let mut opts = elo_launcher::install::InstallOptions::from(&settings);
             opts.verify = verify;
             let (tx, rx) = mpsc::channel();
             let printer = spawn_printer(rx);
-            let res = flint_launcher::install::prepare_profile(
+            let res = elo_launcher::install::prepare_profile(
                 &paths,
                 manifest.as_ref(),
                 &p,
@@ -349,15 +349,15 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
                 return Ok(());
             }
             let settings = Settings::load(&paths);
-            let client_id = flint_launcher::auth::msa_client_id(Some(&settings.msa_client_id))?;
-            let dc = flint_launcher::auth::begin_device_code(&client_id)?;
+            let client_id = elo_launcher::auth::msa_client_id(Some(&settings.msa_client_id))?;
+            let dc = elo_launcher::auth::begin_device_code(&client_id)?;
             println!(
                 "Open {} and enter the code: {}",
                 dc.verification_uri, dc.user_code
             );
             let _ = open::that(&dc.verification_uri);
-            let tokens = flint_launcher::auth::wait_device_code(&client_id, &dc)?;
-            let acc = flint_launcher::auth::complete_login(tokens)?;
+            let tokens = elo_launcher::auth::wait_device_code(&client_id, &dc)?;
+            let acc = elo_launcher::auth::complete_login(tokens)?;
             println!("signed in as {} ({})", acc.username, acc.uuid_dashed());
             accounts.upsert(acc);
             accounts.save(&paths)?;
@@ -390,7 +390,7 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
             Ok(())
         }
         Cmd::Java => {
-            for j in flint_launcher::java::discover(&paths) {
+            for j in elo_launcher::java::discover(&paths) {
                 println!("Java {:<3} {:<20} {}", j.major, j.version, j.path.display());
             }
             Ok(())
@@ -437,14 +437,14 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
             let mut all: Vec<String> = Vec::new();
             if slugs.is_empty() || p.extra.perf_mods {
                 all.extend(
-                    flint_launcher::mods::PERF_MODS
+                    elo_launcher::mods::PERF_MODS
                         .iter()
                         .map(|(s, _)| s.to_string()),
                 );
             }
             let mut extra = p.extra.extra_mods.clone();
             for s in &slugs {
-                let s = flint_launcher::mods::validate_slug(s)?;
+                let s = elo_launcher::mods::validate_slug(s)?;
                 if !extra.contains(&s) {
                     extra.push(s.clone());
                 }
@@ -454,7 +454,7 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
             }
             let (tx, rx) = mpsc::channel();
             let printer = spawn_printer(rx);
-            let res = flint_launcher::mods::install(
+            let res = elo_launcher::mods::install(
                 &paths,
                 &p.game_dir(&paths),
                 &all,
@@ -482,7 +482,7 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
             curseforge,
             limit,
         } => {
-            use flint_launcher::mods::{Kind, SearchQuery};
+            use elo_launcher::mods::{Kind, SearchQuery};
             let settings = Settings::load(&paths);
             let kind = match kind.to_ascii_lowercase().as_str() {
                 "mod" | "mods" => Kind::Mod,
@@ -499,16 +499,16 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
                 limit,
             };
             let page = if curseforge {
-                flint_launcher::mods::search_curseforge(&q, &settings.curseforge_api_key)?
+                elo_launcher::mods::search_curseforge(&q, &settings.curseforge_api_key)?
             } else {
-                flint_launcher::mods::search_modrinth(&q)?
+                elo_launcher::mods::search_modrinth(&q)?
             };
             println!("{} result(s), showing {}:", page.total, page.hits.len());
             for h in &page.hits {
                 println!("{:<40} {:>10} dl  {}", h.reference, h.downloads, h.title);
                 println!("{:<40}               {}", "", truncate(&h.description, 90));
             }
-            println!("\nAdd one to a profile:  flint mods <profile> <reference>");
+            println!("\nAdd one to a profile:  elo mods <profile> <reference>");
             Ok(())
         }
         Cmd::Settings { set } => {
@@ -654,7 +654,7 @@ fn launch(paths: &Paths, a: LaunchArgs) -> Result<()> {
         }
         (None, None) => profiles
             .selected()
-            .ok_or_else(|| anyhow!("no profile selected; run `flint profile add ...`"))?
+            .ok_or_else(|| anyhow!("no profile selected; run `elo profile add ...`"))?
             .clone(),
     };
     if let Some(v) = &a.version {
@@ -675,7 +675,7 @@ fn launch(paths: &Paths, a: LaunchArgs) -> Result<()> {
         let id = accounts
             .selected
             .clone()
-            .ok_or_else(|| anyhow!("no account. Run `flint login` or use `--offline <name>`"))?;
+            .ok_or_else(|| anyhow!("no account. Run `elo login` or use `--offline <name>`"))?;
         session::fresh_account(paths, &settings, &mut accounts, &id, &sink)?
     };
 

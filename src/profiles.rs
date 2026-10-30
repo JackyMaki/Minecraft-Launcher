@@ -439,15 +439,17 @@ pub struct Appearance {
     pub show_hints: bool,
     /// Translucent cards over the background.
     pub glass: bool,
+    /// Draw our own title bar instead of the OS window frame.
+    pub custom_frame: bool,
 }
 
 impl Default for Appearance {
     fn default() -> Self {
         Self {
             theme: "dark".into(),
-            accent: [0x3c, 0x8d, 0x2f],
-            background: [0x16, 0x18, 0x16],
-            panel: [0x22, 0x26, 0x22],
+            accent: [0x2e, 0xb8, 0x6a],
+            background: [0x11, 0x13, 0x16],
+            panel: [0x1a, 0x1d, 0x22],
             text: [0xe6, 0xe6, 0xe6],
             zoom: 1.0,
             rounding: 8,
@@ -458,6 +460,7 @@ impl Default for Appearance {
             play_label: "PLAY".into(),
             show_hints: true,
             glass: true,
+            custom_frame: true,
         }
     }
 }

@@ -1,5 +1,5 @@
 //! End-to-end test: a local mock of Mojang's / Fabric's / Modrinth's servers,
-//! a stand-in "Minecraft" jar, and the real `flint` binary.
+//! a stand-in "Minecraft" jar, and the real `elo` binary.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 fn sha1(data: &[u8]) -> String {
-    flint_launcher::download::sha1_hex(data)
+    elo_launcher::download::sha1_hex(data)
 }
 
 fn jar_with_main(main: &str, entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -133,7 +133,7 @@ impl Mock {
 }
 
 fn bin() -> Command {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_flint"));
+    let mut c = Command::new(env!("CARGO_BIN_EXE_elo"));
     for (k, _) in std::env::vars() {
         if k.to_ascii_lowercase().contains("proxy") {
             c.env_remove(k);
@@ -343,7 +343,7 @@ fn populate(mock: &Mock) -> String {
     // Modrinth: every performance mod resolves to a small jar; sodium depends on fabric-api's project id.
     let mod_jar = jar(&[("mod.txt", b"mod")]);
     let (_, mod_sha, mod_size) = mock.put("/mods/generic.jar", mod_jar);
-    for (slug, _) in flint_launcher::mods::PERF_MODS {
+    for (slug, _) in elo_launcher::mods::PERF_MODS {
         let project_id = format!("id-{slug}");
         let deps = if *slug == "sodium" {
             serde_json::json!([{"project_id": "id-fabric-api", "dependency_type": "required"}])
@@ -425,9 +425,9 @@ fn env_for(cmd: &mut Command, root: &Path, mock: &Mock, manifest_url: &str) {
 
 fn run(cmd: &mut Command) -> (bool, String) {
     let t = Instant::now();
-    let out = cmd.output().expect("failed to run flint");
+    let out = cmd.output().expect("failed to run elo");
     eprintln!(
-        "flint {:?} took {:?}",
+        "elo {:?} took {:?}",
         cmd.get_args().take(3).collect::<Vec<_>>(),
         t.elapsed()
     );
@@ -482,7 +482,7 @@ fn install_launch_quickplay_fabric_and_warm_start() {
     assert_eq!(arg_after(&args, "--username").as_deref(), Some("Steve"));
     assert_eq!(
         arg_after(&args, "--uuid").as_deref(),
-        Some(&flint_launcher::auth::offline_uuid("Steve")[..])
+        Some(&elo_launcher::auth::offline_uuid("Steve")[..])
     );
     assert_eq!(
         arg_after(&args, "--quickPlaySingleplayer").as_deref(),
@@ -612,11 +612,7 @@ fn install_launch_quickplay_fabric_and_warm_start() {
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| n.ends_with(".jar"))
         .collect();
-    assert_eq!(
-        mods.len(),
-        flint_launcher::mods::PERF_MODS.len(),
-        "{mods:?}"
-    );
+    assert_eq!(mods.len(), elo_launcher::mods::PERF_MODS.len(), "{mods:?}");
     assert!(mods.contains(&"sodium-1.0.jar".to_string()));
     let fabric_api_queries = mock
         .hits()
@@ -666,9 +662,9 @@ fn install_launch_quickplay_fabric_and_warm_start() {
     assert!(root
         .join("versions/quilt-loader-0.27.0-mock-1.21/quilt-loader-0.27.0-mock-1.21.json")
         .is_file());
-    assert!(root.join(".flint_mods.json").is_file());
+    assert!(root.join(".elo_mods.json").is_file());
     let managed: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(root.join(".flint_mods.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(root.join(".elo_mods.json")).unwrap())
             .unwrap();
     assert_eq!(managed["loader"], "quilt");
 
@@ -764,7 +760,7 @@ fn install_launch_quickplay_fabric_and_warm_start() {
         "CurseForge file installed: {out}"
     );
     let managed: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(root.join(".flint_mods.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(root.join(".elo_mods.json")).unwrap())
             .unwrap();
     assert_eq!(
         managed["files"]["curseforge:mod:238222"],

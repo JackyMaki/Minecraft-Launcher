@@ -1,14 +1,14 @@
 [package]
-name = "flint-launcher"
+name = "elo-launcher"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
-description = "Flint: a fast, open-source Minecraft launcher. Instant start-up, tuned JVM, Quick Play into worlds and servers, every version and loader, full mod catalog."
+description = "Elo Launcher: a fast, open-source Minecraft launcher. Instant start-up, tuned JVM, Quick Play into worlds and servers, every version and loader, full mod catalog."
 repository = "https://github.com/JackyMaki/Minecraft-Launcher"
 
 [[bin]]
-name = "flint"
+name = "elo"
 path = "src/main.rs"
 
 [features]

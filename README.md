@@ -1,13 +1,12 @@
-# Flint
+# Elo Launcher
 
-A fast, open-source Minecraft launcher written in Rust. Flint and steel: it
-starts the fire instantly.
+A fast, open-source Minecraft launcher written in Rust.
 
 ![screenshot](assets/screenshot.png)
 
-| Mod browser | Appearance | Midnight theme |
+| Installations | Mods | Looks |
 | --- | --- | --- |
-| ![mods](assets/mods.png) | ![appearance](assets/appearance.png) | ![midnight](assets/midnight.png) |
+| ![installations](assets/installations.png) | ![mods](assets/mods.png) | ![looks](assets/looks.png) |
 
 It uses the same `.minecraft` folder and the same `launcher_profiles.json` as
 the official launcher, so your worlds, servers, resource packs and profiles
@@ -55,11 +54,13 @@ are picked up unchanged. Switching back is a one-click affair.
   loader, and CurseForge too once you paste a free API key. One click adds a
   project to the profile; required dependencies come along automatically and
   files are kept up to date on every launch.
-- **Looks the way you want.** Seven themes (Dark, Midnight, Grass, Nether,
-  Ocean, Light, Custom with your own colours), any accent colour, UI size,
-  corner rounding, compact mode, profiles on the left or right, a background
-  picture with adjustable darkening and glass panels, your own text on the
-  Play button. Everything applies live and is saved.
+- **Looks the way you want.** A navigation rail with Play, Installations,
+  Mods, Looks and Settings pages, a hero Play page, Inter typography, soft
+  shadows, hover animations and a custom window frame. Eight themes
+  (Graphite, Midnight, Grass, Nether, Ocean, Amethyst, Light, Custom with your
+  own colours), any accent colour, UI size, corner rounding, compact mode, a
+  background picture with adjustable darkening and glass panels, your own
+  text on the Play button. Everything applies live and is saved.
 - **Profiles.** Name, version, loader, preset, memory, Quick Play target,
   game directory, Java path, extra JVM arguments, window size, extra mods.
 - **Accounts.** Microsoft sign-in (device-code flow, token refresh) and
@@ -85,18 +86,18 @@ yourself:
 
 ```sh
 cargo build --release
-# binary: target/release/flint
+# binary: target/release/elo
 ```
 
 Building needs only a Rust toolchain. A CLI-only build without the GUI is
 available with `cargo build --release --no-default-features`.
 
-Running `flint` without arguments opens the GUI.
+Running `elo` without arguments opens the GUI.
 
 ## Mods from Modrinth and CurseForge
 
-Pick a mod loader for the profile, then press **Mods** (top bar or next to
-the loader). The browser lists the most popular projects for that version and
+Pick a mod loader for the installation, then open **Mods** in the navigation
+rail (or press *Browse mods* next to the loader). The browser lists the most popular projects for that version and
 loader; type to search the whole catalog. Switch between *Mods*, *Resource
 packs* and *Shaders*, and between *Modrinth* and *CurseForge*. **Add** puts a
 project on the profile; files download on the next Play or with *Download
@@ -105,29 +106,29 @@ its file.
 
 CurseForge requires an API key, which is free: create one at
 https://console.curseforge.com (API keys), then paste it under *Settings →
-CurseForge API key*, or run `flint settings curseforge_api_key=...`. Some
-authors opt out of third-party downloads on CurseForge; Flint falls back to
+CurseForge API key*, or run `elo settings curseforge_api_key=...`. Some
+authors opt out of third-party downloads on CurseForge; Elo falls back to
 the CDN path for those files.
 
 From the command line:
 
 ```sh
-flint search sodium --version 1.21.1 --loader fabric
-flint search --kind shader --version 1.21.1          # most popular shaders
-flint search jei --loader forge --curseforge
-flint mods Survival iris curseforge:mod:238222       # add by reference
+elo search sodium --version 1.21.1 --loader fabric
+elo search --kind shader --version 1.21.1          # most popular shaders
+elo search jei --loader forge --curseforge
+elo mods Survival iris curseforge:mod:238222       # add by reference
 ```
 
 References are Modrinth slugs (`sodium`), or `modrinth:shader:<slug>`,
 `modrinth:resourcepack:<slug>`, `curseforge:mod:<id>`, and so on.
 
-## Appearance
+## Looks
 
-*Appearance* in the top bar. Themes, accent colour (with Minecraft-flavoured
-presets), UI size, rounding, compact layout, sidebar side, hints, Play button
-text, background picture with darkening and glass panels. The *Custom* theme
-exposes background, panel and text colours. Settings live in
-`flint/settings.json` inside the game folder.
+The **Looks** page. Themes with live previews, accent colour (with
+Minecraft-flavoured presets), UI size, rounding, compact layout, hints, the
+custom window frame, Play button text, background picture with darkening and
+glass panels. The *Custom* theme exposes background, panel and text colours. Settings live in
+`elo/settings.json` inside the game folder.
 
 ## Mod loaders
 
@@ -161,7 +162,7 @@ sign-in just works: *Accounts → Sign in with Microsoft*.
 2. Request Minecraft API access for that application id via Mojang's form
    (search for "Minecraft API and Azure Application ID form").
 3. Put the client id in the launcher: *Settings → Microsoft client id*, or
-   `flint settings msa_client_id=<id>`, or the environment variable
+   `elo settings msa_client_id=<id>`, or the environment variable
    `MC_LAUNCHER_MSA_CLIENT_ID`.
 
 Then *Accounts → Sign in with Microsoft*. A code is shown and your browser
@@ -178,34 +179,34 @@ Offline accounts (no purchase check) work in singleplayer and on servers with
 ## Command line
 
 ```text
-flint                      open the GUI
-flint versions [-s] [-a]   list versions (snapshots / all)
-flint install 1.21.1 [--loader fabric|quilt|forge|neoforge|legacyfabric]
-flint login [--offline NAME]
-flint profile add "Survival" --version 1.21.1 --loader fabric --world "My World"
-flint profile add "Packs" --version 1.20.1 --loader forge --no-perf-mods
-flint profile add "Hypixel" --version 1.8.9 --server mc.hypixel.net --preset max
-flint profile list | set | remove | select
-flint launch [PROFILE] [--world W | --server HOST[:PORT] | --realm ID]
+elo                      open the GUI
+elo versions [-s] [-a]   list versions (snapshots / all)
+elo install 1.21.1 [--loader fabric|quilt|forge|neoforge|legacyfabric]
+elo login [--offline NAME]
+elo profile add "Survival" --version 1.21.1 --loader fabric --world "My World"
+elo profile add "Packs" --version 1.20.1 --loader forge --no-perf-mods
+elo profile add "Hypixel" --version 1.8.9 --server mc.hypixel.net --preset max
+elo profile list | set | remove | select
+elo launch [PROFILE] [--world W | --server HOST[:PORT] | --realm ID]
                   [--version V] [--loader L] [--offline NAME] [--preset vanilla|smooth|max]
                   [--memory MiB] [--dry-run] [--detach]
-flint worlds [PROFILE]     list worlds and saved servers for Quick Play
-flint mods PROFILE [slugs] install Modrinth mods into a modded profile
-flint java                 show detected Java installations
-flint settings [key=value]
+elo worlds [PROFILE]     list worlds and saved servers for Quick Play
+elo mods PROFILE [slugs] install Modrinth mods into a modded profile
+elo java                 show detected Java installations
+elo settings [key=value]
 ```
 
 Examples:
 
 ```sh
 # Straight into a world with the performance pack, no questions asked
-flint launch Survival --world "My World"
+elo launch Survival --world "My World"
 
 # A one-off launch of a snapshot on an offline account
-flint launch --version 24w14a --offline Steve
+elo launch --version 24w14a --offline Steve
 
 # Add shaders on top of the performance pack
-flint mods Survival iris
+elo mods Survival iris
 ```
 
 Environment variables: `MC_LAUNCHER_ROOT` overrides the game directory;
@@ -230,10 +231,10 @@ Everything lives in the normal game directory (`%APPDATA%\.minecraft`,
 `~/Library/Application Support/minecraft`, `~/.minecraft`):
 
 - `launcher_profiles.json`: shared with the official launcher.
-- `flint/`: Flint's own state (settings, accounts, per-profile extras,
+- `elo/`: Elo's own state (settings, accounts, per-profile extras,
   caches, CDS archives). Delete it to reset the launcher without touching the
   game.
-- `.flint_mods.json` in a game directory: which mod/pack/shader files Flint
+- `.elo_mods.json` in a game directory: which mod/pack/shader files Elo
   manages there.
 - `versions/`, `libraries/`, `assets/`, `runtime/`: identical layout to the
   official launcher.
@@ -257,5 +258,6 @@ workflow builds all four binaries and attaches them to a GitHub Release.
 
 ## License
 
-MIT, see `LICENSE`. Minecraft is a trademark of Mojang AB; this project is not
+MIT, see `LICENSE`. The Inter font in `assets/fonts` is used under the SIL
+Open Font License 1.1 (see `assets/fonts/LICENSE.txt`). Minecraft is a trademark of Mojang AB; this project is not
 affiliated with Mojang or Microsoft.

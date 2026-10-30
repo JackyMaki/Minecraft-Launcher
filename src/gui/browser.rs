@@ -1,6 +1,6 @@
-//! The mod browser: search Modrinth / CurseForge, add to the profile.
+//! The mod browser page: search Modrinth / CurseForge, add to the profile.
 
-use super::theme::Palette;
+use super::theme::{self, Palette};
 use crate::mods::{Kind, SearchPage, SearchQuery, Source};
 use crate::profiles::Profile;
 use eframe::egui::{self, RichText};
@@ -15,7 +15,6 @@ pub enum Action {
 }
 
 pub struct Browser {
-    pub open: bool,
     query: String,
     source: Source,
     kind: Kind,
@@ -24,13 +23,13 @@ pub struct Browser {
     error: Option<String>,
     rx: Option<Receiver<anyhow::Result<SearchPage>>>,
     offset: u32,
+    /// Context key of the last search (source/kind/version/loader/query).
     searched_for: String,
 }
 
 impl Default for Browser {
     fn default() -> Self {
         Self {
-            open: false,
             query: String::new(),
             source: Source::Modrinth,
             kind: Kind::Mod,
@@ -47,6 +46,16 @@ impl Default for Browser {
 const PAGE: u32 = 20;
 
 impl Browser {
+    fn context_key(&self, profile: &Profile, game_version: &str) -> String {
+        format!(
+            "{:?}/{:?}/{}/{}",
+            self.source,
+            self.kind,
+            game_version,
+            profile.extra.loader.id()
+        )
+    }
+
     fn search(&mut self, ctx: &egui::Context, profile: &Profile, game_version: &str, cf_key: &str) {
         let q = SearchQuery {
             text: self.query.trim().to_string(),
@@ -56,14 +65,7 @@ impl Browser {
             offset: self.offset,
             limit: PAGE,
         };
-        self.searched_for = format!(
-            "{:?}/{:?}/{}/{}/{}",
-            self.source,
-            self.kind,
-            game_version,
-            profile.extra.loader.id(),
-            q.text
-        );
+        self.searched_for = self.context_key(profile, game_version);
         self.loading = true;
         self.error = None;
         let (tx, rx) = mpsc::channel();
@@ -94,208 +96,240 @@ impl Browser {
         }
     }
 
-    pub fn show(
+    /// Draw the browser inline. The first search for a context runs automatically.
+    pub fn page(
         &mut self,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         pal: &Palette,
         profile: &mut Profile,
         game_version: &str,
         cf_key: &str,
     ) -> Action {
-        if !self.open {
-            return Action::None;
-        }
+        let ctx = ui.ctx().clone();
         self.poll();
+        if !self.loading
+            && self.error.is_none()
+            && self.searched_for != self.context_key(profile, game_version)
+        {
+            self.offset = 0;
+            self.search(&ctx, profile, game_version, cf_key);
+        }
         let mut action = Action::None;
-        let mut open = self.open;
         let mut do_search = false;
         let mut install_now = false;
-        egui::Window::new("Mods, resource packs and shaders")
-            .open(&mut open)
-            .default_size([760.0, 500.0])
-            .min_size([560.0, 360.0])
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("for {}  ·  {}  ·  {}", profile.display_name(), game_version, profile.extra.loader.label())).weak());
-                });
-                ui.horizontal(|ui| {
-                    for s in [Source::Modrinth, Source::CurseForge] {
-                        if ui.selectable_label(self.source == s, s.label()).clicked() && self.source != s {
-                            self.source = s;
-                            self.offset = 0;
-                            do_search = true;
-                        }
-                    }
-                    ui.separator();
-                    for k in Kind::ALL {
-                        if ui.selectable_label(self.kind == k, k.label()).clicked() && self.kind != k {
-                            self.kind = k;
-                            self.offset = 0;
-                            do_search = true;
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut self.query)
-                            .hint_text("search the whole catalog… (empty = most popular)")
-                            .desired_width(ui.available_width() - 110.0),
-                    );
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        self.offset = 0;
-                        do_search = true;
-                    }
-                    if ui.add_sized([96.0, 24.0], egui::Button::new("Search")).clicked() {
-                        self.offset = 0;
-                        do_search = true;
-                    }
-                });
-                if self.source == Source::CurseForge && cf_key.trim().is_empty() {
-                    ui.colored_label(pal.danger, "CurseForge needs a free API key: Settings → CurseForge API key (console.curseforge.com).");
-                }
-                ui.separator();
 
-                // Installed list
-                let perf_on = profile.extra.perf_mods && profile.extra.loader.is_modded();
-                egui::CollapsingHeader::new(format!("In this profile ({}{})", profile.extra.extra_mods.len(), if perf_on { " + performance pack" } else { "" }))
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        if perf_on {
-                            ui.label(RichText::new(format!("Performance pack: {}", crate::mods::PERF_MODS.iter().map(|(s, _)| *s).collect::<Vec<_>>().join(", "))).weak());
-                        }
-                        let mut remove: Option<usize> = None;
-                        for (i, m) in profile.extra.extra_mods.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.label(m);
-                                if ui.small_button("remove").clicked() {
-                                    remove = Some(i);
-                                }
-                            });
-                        }
-                        if let Some(i) = remove {
-                            profile.extra.extra_mods.remove(i);
-                            action = Action::Changed;
-                        }
-                        if ui.button("⬇ Download / update now").on_hover_text("Otherwise this happens when you press Play").clicked() {
-                            install_now = true;
-                        }
-                    });
-                ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Mods, packs & shaders").font(theme::bold(24.0)));
+            ui.label(
+                RichText::new(format!(
+                    "{}  ·  {}  ·  {}",
+                    profile.display_name(),
+                    game_version,
+                    profile.extra.loader.label()
+                ))
+                .color(pal.weak),
+            );
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            for s in [Source::Modrinth, Source::CurseForge] {
+                if pill(ui, pal, self.source == s, s.label()).clicked() && self.source != s {
+                    self.source = s;
+                    self.offset = 0;
+                    self.error = None;
+                    do_search = true;
+                }
+            }
+            ui.add_space(12.0);
+            for k in Kind::ALL {
+                if pill(ui, pal, self.kind == k, k.label()).clicked() && self.kind != k {
+                    self.kind = k;
+                    self.offset = 0;
+                    self.error = None;
+                    do_search = true;
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut self.query)
+                    .hint_text("Search the whole catalog…  (empty = most popular)")
+                    .font(egui::TextStyle::Body)
+                    .margin(egui::Margin::symmetric(12, 8))
+                    .desired_width(ui.available_width() - 130.0),
+            );
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.offset = 0;
+                do_search = true;
+            }
+            let btn = egui::Button::new(RichText::new("Search").color(pal.on_accent))
+                .fill(pal.accent)
+                .min_size(egui::vec2(110.0, 32.0));
+            if ui.add(btn).clicked() {
+                self.offset = 0;
+                do_search = true;
+            }
+        });
+        if self.source == Source::CurseForge && cf_key.trim().is_empty() {
+            ui.colored_label(pal.danger, "CurseForge needs a free API key: Settings → CurseForge API key (console.curseforge.com).");
+        }
+        ui.add_space(6.0);
 
-                // Results
-                if self.loading {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Searching…");
-                    });
+        // Installed list
+        let perf_on = profile.extra.perf_mods && profile.extra.loader.is_modded();
+        let n = profile.extra.extra_mods.len();
+        egui::CollapsingHeader::new(
+            RichText::new(format!(
+                "In this profile: {n} from the catalog{}",
+                if perf_on { " + performance pack" } else { "" }
+            ))
+            .font(theme::semibold(14.0)),
+        )
+        .default_open(false)
+        .show(ui, |ui| {
+            if perf_on {
+                ui.label(
+                    RichText::new(format!(
+                        "Performance pack: {}",
+                        crate::mods::PERF_MODS
+                            .iter()
+                            .map(|(s, _)| *s)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .color(pal.weak),
+                );
+            }
+            let mut remove: Option<usize> = None;
+            for (i, m) in profile.extra.extra_mods.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(m);
+                    if ui.small_button("remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                profile.extra.extra_mods.remove(i);
+                action = Action::Changed;
+            }
+            if ui
+                .button("⬇ Download / update now")
+                .on_hover_text("Otherwise this happens when you press Play")
+                .clicked()
+            {
+                install_now = true;
+            }
+        });
+        ui.add_space(4.0);
+
+        // Results
+        if self.loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Searching…");
+            });
+        }
+        if let Some(e) = &self.error {
+            ui.colored_label(pal.danger, e);
+        }
+        let page = self.page.clone();
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            if let Some(page) = &page {
+                if page.hits.is_empty() && !self.loading {
+                    ui.label("Nothing found for this version and loader.");
                 }
-                if let Some(e) = &self.error {
-                    ui.colored_label(pal.danger, e);
-                }
-                let page = self.page.clone();
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    if let Some(page) = &page {
-                        if page.hits.is_empty() && !self.loading {
-                            ui.label("Nothing found for this version and loader.");
-                        }
-                        for h in &page.hits {
-                            let installed = profile.extra.extra_mods.iter().any(|m| m == &h.reference)
-                                || (h.source == Source::Modrinth && perf_on && crate::mods::PERF_MODS.iter().any(|(s, _)| *s == h.reference));
-                            let frame = egui::Frame::new()
-                                .fill(pal.card)
-                                .corner_radius(8.0)
-                                .inner_margin(egui::Margin::symmetric(10, 8))
-                                .stroke(egui::Stroke::new(1.0_f32, pal.stroke));
-                            frame.show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
+                for h in &page.hits {
+                    let installed = profile.extra.extra_mods.iter().any(|m| m == &h.reference)
+                        || (h.source == Source::Modrinth && perf_on && crate::mods::PERF_MODS.iter().any(|(s, _)| *s == h.reference));
+                    let frame = egui::Frame::new()
+                        .fill(pal.card)
+                        .corner_radius(12.0)
+                        .inner_margin(egui::Margin::symmetric(12, 10))
+                        .stroke(egui::Stroke::new(1.0_f32, pal.stroke));
+                    frame.show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(46.0, 46.0), egui::Sense::hover());
+                            let hue = h.title.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32)) % 360;
+                            let color = egui::ecolor::Hsva::new(hue as f32 / 360.0, 0.5, if pal.dark { 0.6 } else { 0.78 }, 1.0);
+                            ui.painter().rect_filled(rect, 10.0, color);
+                            let initial: String = h.title.chars().next().unwrap_or('?').to_uppercase().collect();
+                            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, initial, theme::bold(21.0), egui::Color32::WHITE);
+                            ui.add_space(4.0);
+                            ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
-                                    // Initial badge instead of a network icon: instant and offline-safe.
-                                    let (rect, _) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::hover());
-                                    let hue = h.title.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32)) % 360;
-                                    let color = egui::ecolor::Hsva::new(hue as f32 / 360.0, 0.45, if pal.dark { 0.55 } else { 0.75 }, 1.0);
-                                    ui.painter().rect_filled(rect, 8.0, color);
-                                    let initial: String = h.title.chars().next().unwrap_or('?').to_uppercase().collect();
-                                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, initial, egui::FontId::proportional(18.0), egui::Color32::WHITE);
-                                    ui.vertical(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label(RichText::new(&h.title).strong().size(15.0));
-                                            if !h.author.is_empty() {
-                                                ui.label(RichText::new(format!("by {}", h.author)).weak());
+                                    ui.label(RichText::new(&h.title).font(theme::semibold(16.0)));
+                                    if !h.author.is_empty() {
+                                        ui.label(RichText::new(format!("by {}", h.author)).color(pal.weak));
+                                    }
+                                    ui.label(RichText::new(format!("{} downloads", human(h.downloads))).color(pal.weak));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let label = if installed { "✔ Added" } else { "+ Add" };
+                                        let btn = egui::Button::new(RichText::new(label).color(if installed { pal.text } else { pal.on_accent }))
+                                            .fill(if installed { pal.panel } else { pal.accent })
+                                            .min_size(egui::vec2(84.0, 28.0));
+                                        if ui.add(btn).clicked() {
+                                            if installed {
+                                                profile.extra.extra_mods.retain(|m| m != &h.reference);
+                                            } else {
+                                                profile.extra.extra_mods.push(h.reference.clone());
                                             }
-                                            ui.label(RichText::new(format!("{} downloads", human(h.downloads))).weak());
-                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                let label = if installed { "✔ Added" } else { "+ Add" };
-                                                let btn = egui::Button::new(RichText::new(label).color(if installed { pal.text } else { pal.on_accent }))
-                                                    .fill(if installed { pal.panel } else { pal.accent });
-                                                if ui.add(btn).clicked() {
-                                                    if installed {
-                                                        profile.extra.extra_mods.retain(|m| m != &h.reference);
-                                                    } else {
-                                                        profile.extra.extra_mods.push(h.reference.clone());
-                                                    }
-                                                    action = Action::Changed;
-                                                }
-                                                if !h.page_url.is_empty() && ui.small_button("page").clicked() {
-                                                    let _ = open::that(&h.page_url);
-                                                }
-                                            });
-                                        });
-                                        ui.label(RichText::new(short(&h.description, 160)).color(pal.weak));
+                                            action = Action::Changed;
+                                        }
+                                        if !h.page_url.is_empty() && ui.small_button("page").clicked() {
+                                            let _ = open::that(&h.page_url);
+                                        }
                                     });
                                 });
+                                ui.label(RichText::new(short(&h.description, 170)).color(pal.weak));
                             });
-                            ui.add_space(2.0);
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
+                if page.total > PAGE as u64 {
+                    ui.horizontal(|ui| {
+                        if self.offset > 0 && ui.button("◀ Previous").clicked() {
+                            self.offset = self.offset.saturating_sub(PAGE);
+                            do_search = true;
                         }
-                        if page.total > PAGE as u64 {
-                            ui.horizontal(|ui| {
-                                if self.offset > 0 && ui.button("◀ Previous").clicked() {
-                                    self.offset = self.offset.saturating_sub(PAGE);
-                                    do_search = true;
-                                }
-                                ui.label(RichText::new(format!("{}–{} of {}", self.offset + 1, (self.offset + PAGE).min(page.total as u32), page.total)).weak());
-                                if (self.offset + PAGE) < page.total as u32 && ui.button("Next ▶").clicked() {
-                                    self.offset += PAGE;
-                                    do_search = true;
-                                }
-                            });
+                        ui.label(RichText::new(format!("{}–{} of {}", self.offset + 1, (self.offset + PAGE).min(page.total as u32), page.total)).color(pal.weak));
+                        if (self.offset + PAGE) < page.total as u32 && ui.button("Next ▶").clicked() {
+                            self.offset += PAGE;
+                            do_search = true;
                         }
-                    } else if !self.loading && self.error.is_none() {
-                        ui.label(RichText::new("Press Search to list the most popular projects for this version, or type a name.").weak());
-                    }
-                });
-            });
-        self.open = open;
+                    });
+                }
+            } else if !self.loading && self.error.is_none() {
+                ui.label(RichText::new("Press Search to list the most popular projects for this version, or type a name.").color(pal.weak));
+            }
+        });
+
         if do_search && !self.loading {
-            self.search(ctx, profile, game_version, cf_key);
+            self.search(&ctx, profile, game_version, cf_key);
         }
         if install_now {
             action = Action::InstallNow;
         }
         action
     }
+}
 
-    /// Run a first search automatically when the window opens.
-    pub fn open_for(
-        &mut self,
-        ctx: &egui::Context,
-        profile: &Profile,
-        game_version: &str,
-        cf_key: &str,
-    ) {
-        self.open = true;
-        let key = format!(
-            "{:?}/{:?}/{}/{}/{}",
-            self.source,
-            self.kind,
-            game_version,
-            profile.extra.loader.id(),
-            self.query.trim()
-        );
-        if self.page.is_none() || self.searched_for != key {
-            self.offset = 0;
-            self.search(ctx, profile, game_version, cf_key);
-        }
-    }
+/// A rounded toggle chip.
+pub fn pill(ui: &mut egui::Ui, pal: &Palette, selected: bool, label: &str) -> egui::Response {
+    let text = RichText::new(label)
+        .font(theme::semibold(13.5))
+        .color(if selected { pal.on_accent } else { pal.text });
+    let btn = egui::Button::new(text)
+        .fill(if selected { pal.accent } else { pal.card })
+        .corner_radius(999.0)
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            if selected { pal.accent } else { pal.stroke },
+        ));
+    ui.add(btn)
 }
 
 fn human(n: u64) -> String {

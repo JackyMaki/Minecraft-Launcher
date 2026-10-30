@@ -88,10 +88,14 @@ impl Paths {
     }
     /// Launcher-private state (caches, accounts, extra profile settings).
     pub fn launcher_dir(&self) -> PathBuf {
-        let dir = self.root.join("flint");
-        let legacy = self.root.join("launcher_fast");
-        if !dir.exists() && legacy.is_dir() {
-            let _ = std::fs::rename(&legacy, &dir);
+        let dir = self.root.join("elo");
+        if !dir.exists() {
+            for legacy in ["flint", "launcher_fast"] {
+                let old = self.root.join(legacy);
+                if old.is_dir() && std::fs::rename(&old, &dir).is_ok() {
+                    break;
+                }
+            }
         }
         dir
     }

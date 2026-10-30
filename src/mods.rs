@@ -585,7 +585,7 @@ pub fn resolve_curseforge(
 // ---------------------------------------------------------------- install
 
 /// Which file we manage for each reference, so updates replace old files and
-/// removed entries are cleaned up. Stored at `<game_dir>/.flint_mods.json`.
+/// removed entries are cleaned up. Stored at `<game_dir>/.elo_mods.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ManagedMods {
     #[serde(default)]
@@ -599,12 +599,15 @@ pub struct ManagedMods {
 
 impl ManagedMods {
     fn path(game_dir: &Path) -> PathBuf {
-        game_dir.join(".flint_mods.json")
+        game_dir.join(".elo_mods.json")
     }
     pub fn load(game_dir: &Path) -> Self {
         let p = Self::path(game_dir);
-        let legacy = game_dir.join("mods").join(".launcher_mods.json");
-        let text = std::fs::read_to_string(&p).or_else(|_| std::fs::read_to_string(&legacy));
+        let text = std::fs::read_to_string(&p)
+            .or_else(|_| std::fs::read_to_string(game_dir.join(".flint_mods.json")))
+            .or_else(|_| {
+                std::fs::read_to_string(game_dir.join("mods").join(".launcher_mods.json"))
+            });
         let mut m: Self = text
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())

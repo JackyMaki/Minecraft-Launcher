@@ -850,6 +850,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "elo-launcher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "env_logger",
+ "image",
+ "log",
+ "md-5",
+ "open",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq",
+ "uuid",
+ "zip",
+]
+
+[[package]]
 name = "emath"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -997,33 +1024,6 @@ dependencies = [
  "crc32fast",
  "miniz_oxide 0.9.1",
  "zlib-rs",
-]
-
-[[package]]
-name = "flint-launcher"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "dirs",
- "eframe",
- "egui",
- "egui_extras",
- "env_logger",
- "image",
- "log",
- "md-5",
- "open",
- "serde",
- "serde_json",
- "sha1",
- "sysinfo",
- "tempfile",
- "thiserror 2.0.21",
- "ureq",
- "uuid",
- "zip",
 ]
 
 [[package]]
