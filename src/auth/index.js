@@ -17,7 +17,7 @@ export async function completeLogin(msa) {
   const xsts = await getXstsToken(xbl.token);
   const mc = await loginWithXbox(xsts.userHash, xsts.token);
   if (!(await ownsMinecraft(mc.accessToken))) {
-    throw new Error('This Microsoft account does not own Minecraft: Java Edition.');
+    throw new Error('This Microsoft account does not own Minecraft: Java Edition, so Lantern cannot launch it.');
   }
   const profile = await getProfile(mc.accessToken);
   return {

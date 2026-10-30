@@ -1,11 +1,11 @@
 {
-  "name": "minecraft-launcher",
+  "name": "lantern",
   "version": "0.1.0",
-  "description": "Minecraft launcher with Microsoft account (MSA) login",
+  "description": "Lantern: a Minecraft launcher with Microsoft account (MSA) login",
   "type": "module",
   "license": "MIT",
   "engines": { "node": ">=20" },
-  "bin": { "mc-login": "bin/login.js" },
+  "bin": { "lantern": "bin/login.js" },
   "scripts": {
     "login": "node bin/login.js",
     "logout": "node bin/login.js --logout",

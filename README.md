@@ -1,6 +1,6 @@
-# Minecraft Launcher
+# Lantern
 
-A Minecraft: Java Edition launcher with Microsoft account (MSA) login.
+Lantern is a Minecraft: Java Edition launcher with Microsoft account (MSA) login.
 
 ## Microsoft account login
 
