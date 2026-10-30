@@ -22,7 +22,8 @@ pub fn run(paths: Paths) -> Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1040.0, 660.0])
             .with_min_inner_size([780.0, 520.0])
-            .with_title("Minecraft Launcher"),
+            .with_title("Minecraft Launcher")
+            .with_icon(std::sync::Arc::new(icon())),
         persist_window: true,
         ..Default::default()
     };
@@ -437,56 +438,73 @@ impl App {
     // ---------------------------------------------------------------- UI
 
     fn top_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Minecraft Launcher").size(20.0).strong());
-                ui.label(RichText::new(format!("v{}", crate::LAUNCHER_VERSION)).weak());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⚙ Settings").clicked() {
-                        self.show_settings = true;
-                    }
-                    let acc_label = self
-                        .accounts
-                        .selected()
-                        .map(|a| format!("👤 {}", a.username))
-                        .unwrap_or_else(|| "👤 No account".to_string());
-                    egui::ComboBox::from_id_salt("account")
-                        .selected_text(acc_label)
-                        .show_ui(ui, |ui| {
-                            let mut pick: Option<String> = None;
-                            for a in &self.accounts.accounts {
-                                let sel = self.accounts.selected.as_deref() == Some(&a.id);
-                                let kind = match a.kind {
-                                    crate::auth::AccountKind::Microsoft => "Microsoft",
-                                    crate::auth::AccountKind::Offline => "offline",
-                                };
-                                if ui
-                                    .selectable_label(sel, format!("{} ({kind})", a.username))
-                                    .clicked()
-                                {
-                                    pick = Some(a.id.clone());
+        let frame = egui::Frame::new()
+            .fill(Color32::from_rgb(0x14, 0x1c, 0x14))
+            .inner_margin(egui::Margin::symmetric(14, 8));
+        egui::TopBottomPanel::top("top")
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+                    paint_block(ui.painter(), rect);
+                    ui.label(
+                        RichText::new("Minecraft Launcher")
+                            .size(20.0)
+                            .strong()
+                            .color(Color32::from_rgb(0xe8, 0xf0, 0xe0)),
+                    );
+                    ui.label(RichText::new(format!("v{}", crate::LAUNCHER_VERSION)).weak());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("⚙ Settings").clicked() {
+                            self.show_settings = true;
+                        }
+                        let acc_label = self
+                            .accounts
+                            .selected()
+                            .map(|a| format!("👤 {}", a.username))
+                            .unwrap_or_else(|| "👤 No account".to_string());
+                        egui::ComboBox::from_id_salt("account")
+                            .selected_text(acc_label)
+                            .show_ui(ui, |ui| {
+                                let mut pick: Option<String> = None;
+                                for a in &self.accounts.accounts {
+                                    let sel = self.accounts.selected.as_deref() == Some(&a.id);
+                                    let kind = match a.kind {
+                                        crate::auth::AccountKind::Microsoft => "Microsoft",
+                                        crate::auth::AccountKind::Offline => "offline",
+                                    };
+                                    if ui
+                                        .selectable_label(sel, format!("{} ({kind})", a.username))
+                                        .clicked()
+                                    {
+                                        pick = Some(a.id.clone());
+                                    }
                                 }
-                            }
-                            ui.separator();
-                            if ui.button("Manage accounts…").clicked() {
-                                self.show_accounts = true;
-                            }
-                            if let Some(id) = pick {
-                                self.accounts.selected = Some(id);
-                                let _ = self.accounts.save(&self.paths);
-                            }
-                        });
+                                ui.separator();
+                                if ui.button("Manage accounts…").clicked() {
+                                    self.show_accounts = true;
+                                }
+                                if let Some(id) = pick {
+                                    self.accounts.selected = Some(id);
+                                    let _ = self.accounts.save(&self.paths);
+                                }
+                            });
+                    });
                 });
+                ui.add_space(4.0);
             });
-            ui.add_space(4.0);
-        });
     }
 
     fn side_panel(&mut self, ctx: &egui::Context) {
+        let frame = egui::Frame::new()
+            .fill(Color32::from_rgb(0x1a, 0x1e, 0x1a))
+            .inner_margin(egui::Margin::symmetric(8, 6));
         egui::SidePanel::left("profiles")
             .resizable(false)
-            .exact_width(240.0)
+            .exact_width(250.0)
+            .frame(frame)
             .show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -510,7 +528,12 @@ impl App {
                             .unwrap_or_else(|| p.official.last_version_id.clone());
                         let color = match p.extra.loader {
                             Loader::Vanilla => ACCENT_HOVER,
-                            Loader::Fabric => Color32::from_rgb(0xdb, 0xb7, 0x6c),
+                            Loader::Fabric | Loader::LegacyFabric => {
+                                Color32::from_rgb(0xdb, 0xb7, 0x6c)
+                            }
+                            Loader::Quilt => Color32::from_rgb(0xc7, 0x7d, 0xff),
+                            Loader::Forge => Color32::from_rgb(0x5c, 0x8a, 0xd6),
+                            Loader::NeoForge => Color32::from_rgb(0xf1, 0x8a, 0x3c),
                         };
                         let qp = match &p.extra.quick_play {
                             QuickPlay::None => String::new(),
@@ -655,7 +678,10 @@ impl App {
     }
 
     fn central(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let bg = egui::Frame::new()
+            .fill(Color32::from_rgb(0x22, 0x26, 0x22))
+            .inner_margin(egui::Margin::same(12));
+        egui::CentralPanel::default().frame(bg).show(ctx, |ui| {
             let Some(key) = self.profiles.selected.clone() else {
                 ui.centered_and_justified(|ui| ui.label("Create a profile to get started."));
                 return;
@@ -663,11 +689,17 @@ impl App {
             let Some(mut p) = self.profiles.get(&key).cloned() else { return };
             let mut changed = false;
 
+            let card = egui::Frame::new()
+                .fill(ui.visuals().panel_fill)
+                .corner_radius(10.0)
+                .inner_margin(egui::Margin::same(16))
+                .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(0x33, 0x3a, 0x33)));
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.add_space(6.0);
+              card.show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 // Name
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Name").strong());
+                    ui.label(RichText::new("Name").strong().color(ACCENT_HOVER));
                     let mut name = p.display_name();
                     let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(300.0));
                     if r.changed() {
@@ -689,7 +721,7 @@ impl App {
 
                 // Version
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Version").strong());
+                    ui.label(RichText::new("Version").strong().color(ACCENT_HOVER));
                     let mut v = p.official.last_version_id.clone();
                     if self.version_picker(ui, &mut v) {
                         p.official.last_version_id = v;
@@ -700,21 +732,28 @@ impl App {
 
                 // Loader
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Loader").strong());
-                    changed |= ui.radio_value(&mut p.extra.loader, Loader::Vanilla, "Vanilla").changed();
-                    changed |= ui.radio_value(&mut p.extra.loader, Loader::Fabric, "Fabric").changed();
+                    ui.label(RichText::new("Loader").strong().color(ACCENT_HOVER));
+                    egui::ComboBox::from_id_salt("loader")
+                        .selected_text(p.extra.loader.label())
+                        .show_ui(ui, |ui| {
+                            for l in Loader::ALL {
+                                changed |= ui
+                                    .selectable_value(&mut p.extra.loader, l, l.label())
+                                    .on_hover_text(l.hint())
+                                    .clicked();
+                            }
+                        });
+                    ui.label(RichText::new(p.extra.loader.hint()).weak());
                 });
-                if p.extra.loader == Loader::Fabric {
-                    ui.indent("fabric", |ui| {
+                if p.extra.loader.is_modded() {
+                    ui.indent("modded", |ui| {
                         changed |= ui
                             .checkbox(&mut p.extra.perf_mods, "Install the performance pack (Sodium, Lithium, C2ME, ModernFix, …)")
-                            .on_hover_text(
-                                crate::mods::PERF_MODS
-                                    .iter()
-                                    .map(|(s, d)| format!("{s}: {d}"))
-                                    .collect::<Vec<_>>()
-                                    .join("\n"),
-                            )
+                            .on_hover_text(format!(
+                                "Mods without a {} build are skipped automatically.\n\n{}",
+                                p.extra.loader.label(),
+                                crate::mods::PERF_MODS.iter().map(|(s, d)| format!("{s}: {d}")).collect::<Vec<_>>().join("\n")
+                            ))
                             .changed();
                         ui.horizontal(|ui| {
                             ui.label("Extra Modrinth mods:");
@@ -738,7 +777,7 @@ impl App {
 
                 // Performance
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Performance").strong());
+                    ui.label(RichText::new("Performance").strong().color(ACCENT_HOVER));
                     egui::ComboBox::from_id_salt("preset")
                         .selected_text(p.extra.perf.label())
                         .show_ui(ui, |ui| {
@@ -749,7 +788,7 @@ impl App {
                 });
                 ui.horizontal(|ui| {
                     ui.label("Memory");
-                    let auto = crate::perf::heap_mb(p.extra.perf, None, p.extra.loader == Loader::Fabric);
+                    let auto = crate::perf::heap_mb(p.extra.perf, None, p.extra.loader.is_modded());
                     let total = crate::perf::total_memory_mb();
                     let r = ui.add(
                         egui::Slider::new(&mut p.extra.memory_mb, 0..=total.min(32768))
@@ -767,7 +806,7 @@ impl App {
                 ui.add_space(8.0);
 
                 // Quick Play
-                ui.label(RichText::new("Quick Play (skip the menus)").strong());
+                ui.label(RichText::new("Quick Play (skip the menus)").strong().color(ACCENT_HOVER));
                 ui.horizontal(|ui| {
                     let mut k = self.qp_kind;
                     ui.radio_value(&mut k, QpKind::None, "Main menu");
@@ -873,13 +912,14 @@ impl App {
                             changed = true;
                         }
                         ui.end_row();
-                        ui.label("Fabric loader version");
-                        if ui.add(egui::TextEdit::singleline(&mut p.extra.fabric_loader).hint_text("latest stable").desired_width(140.0)).changed() {
+                        ui.label("Loader version");
+                        if ui.add(egui::TextEdit::singleline(&mut p.extra.loader_version).hint_text("latest stable / recommended").desired_width(200.0)).changed() {
                             changed = true;
                         }
                         ui.end_row();
                     });
                 });
+              });
             });
 
             if changed {
@@ -896,103 +936,107 @@ impl App {
     }
 
     fn bottom(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let can_play = !self.busy && self.profiles.selected.is_some();
-                let label = if self.busy {
-                    "…"
-                } else if self.game_pid.is_some() {
-                    "▶ PLAY AGAIN"
-                } else {
-                    "▶ PLAY"
-                };
-                let btn = egui::Button::new(
-                    RichText::new(label)
-                        .size(22.0)
-                        .strong()
-                        .color(Color32::WHITE),
-                )
-                .fill(if can_play {
-                    ACCENT
-                } else {
-                    ACCENT.gamma_multiply(0.4)
-                })
-                .min_size(egui::vec2(220.0, 48.0));
-                if ui
-                    .add_enabled(can_play, btn)
-                    .on_hover_text("Install anything missing and start the game")
-                    .clicked()
-                {
-                    self.play(ctx);
-                }
-                ui.vertical(|ui| {
-                    if self.busy {
-                        let (done, total) = self.step;
-                        let frac = if total > 0 {
-                            done as f32 / total as f32
-                        } else {
-                            0.0
-                        };
-                        let text = if total > 0 {
-                            format!("{}  {done}/{total}", self.phase)
-                        } else {
-                            self.phase.clone()
-                        };
-                        ui.add(egui::ProgressBar::new(frac).text(text).animate(total == 0));
-                    } else if let Some(e) = &self.error {
-                        ui.colored_label(DANGER, format!("⚠ {e}"));
-                    } else if !self.status.is_empty() {
-                        ui.label(&self.status);
+        let frame = egui::Frame::new()
+            .fill(Color32::from_rgb(0x1a, 0x1e, 0x1a))
+            .inner_margin(egui::Margin::symmetric(14, 10));
+        egui::TopBottomPanel::bottom("bottom")
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let can_play = !self.busy && self.profiles.selected.is_some();
+                    let label = if self.busy {
+                        "…"
+                    } else if self.game_pid.is_some() {
+                        "▶ PLAY AGAIN"
                     } else {
-                        let p = self.selected_profile();
-                        let hint = match p.map(|p| &p.extra.quick_play) {
-                            Some(QuickPlay::Singleplayer { world }) => {
-                                format!("Will open world “{world}” directly.")
-                            }
-                            Some(QuickPlay::Multiplayer { address }) => {
-                                format!("Will connect to {address} directly.")
-                            }
-                            Some(QuickPlay::Realms { .. }) => {
-                                "Will join the Realm directly.".into()
-                            }
-                            _ => format!("Ready. Game folder: {}", self.paths.root.display()),
-                        };
-                        ui.label(RichText::new(hint).weak());
+                        "▶ PLAY"
+                    };
+                    let btn = egui::Button::new(
+                        RichText::new(label)
+                            .size(22.0)
+                            .strong()
+                            .color(Color32::WHITE),
+                    )
+                    .fill(if can_play {
+                        ACCENT
+                    } else {
+                        ACCENT.gamma_multiply(0.4)
+                    })
+                    .min_size(egui::vec2(220.0, 48.0));
+                    if ui
+                        .add_enabled(can_play, btn)
+                        .on_hover_text("Install anything missing and start the game")
+                        .clicked()
+                    {
+                        self.play(ctx);
                     }
-                    ui.horizontal(|ui| {
-                        ui.toggle_value(&mut self.show_log, "📜 Log");
-                        if self.error.is_some() && ui.small_button("dismiss").clicked() {
-                            self.error = None;
+                    ui.vertical(|ui| {
+                        if self.busy {
+                            let (done, total) = self.step;
+                            let frac = if total > 0 {
+                                done as f32 / total as f32
+                            } else {
+                                0.0
+                            };
+                            let text = if total > 0 {
+                                format!("{}  {done}/{total}", self.phase)
+                            } else {
+                                self.phase.clone()
+                            };
+                            ui.add(egui::ProgressBar::new(frac).text(text).animate(total == 0));
+                        } else if let Some(e) = &self.error {
+                            ui.colored_label(DANGER, format!("⚠ {e}"));
+                        } else if !self.status.is_empty() {
+                            ui.label(&self.status);
+                        } else {
+                            let p = self.selected_profile();
+                            let hint = match p.map(|p| &p.extra.quick_play) {
+                                Some(QuickPlay::Singleplayer { world }) => {
+                                    format!("Will open world “{world}” directly.")
+                                }
+                                Some(QuickPlay::Multiplayer { address }) => {
+                                    format!("Will connect to {address} directly.")
+                                }
+                                Some(QuickPlay::Realms { .. }) => {
+                                    "Will join the Realm directly.".into()
+                                }
+                                _ => format!("Ready. Game folder: {}", self.paths.root.display()),
+                            };
+                            ui.label(RichText::new(hint).weak());
                         }
-                        if ui.small_button("📂 Open game folder").clicked() {
-                            let _ = open::that(&self.paths.root);
-                        }
+                        ui.horizontal(|ui| {
+                            ui.toggle_value(&mut self.show_log, "📜 Log");
+                            if self.error.is_some() && ui.small_button("dismiss").clicked() {
+                                self.error = None;
+                            }
+                            if ui.small_button("📂 Open game folder").clicked() {
+                                let _ = open::that(&self.paths.root);
+                            }
+                        });
                     });
                 });
+                if self.show_log {
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(180.0)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            let text: String = self
+                                .log
+                                .iter()
+                                .map(|l| l.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            ui.add(
+                                egui::TextEdit::multiline(&mut text.as_str())
+                                    .code_editor()
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(8),
+                            );
+                        });
+                }
+                ui.add_space(6.0);
             });
-            if self.show_log {
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .max_height(180.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        let text: String = self
-                            .log
-                            .iter()
-                            .map(|l| l.as_str())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        ui.add(
-                            egui::TextEdit::multiline(&mut text.as_str())
-                                .code_editor()
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(8),
-                        );
-                    });
-            }
-            ui.add_space(6.0);
-        });
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -1177,6 +1221,63 @@ impl eframe::App for App {
             let _ = self.profiles.save(&self.paths);
         }
     }
+}
+
+/// A little grass block, drawn procedurally so we need no image decoder.
+fn icon() -> egui::IconData {
+    const N: usize = 64;
+    let mut rgba = vec![0u8; N * N * 4];
+    let mut seed: u32 = 0x9e37_79b9;
+    let mut noise = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed >> 24) as i32 - 128
+    };
+    for y in 0..N {
+        for x in 0..N {
+            let i = (y * N + x) * 4;
+            let n = noise() / 10;
+            let grass = y < 22 || (y < 26 && (x / 4 + y) % 3 != 0);
+            let (r, g, b) = if grass {
+                (0x5d + n, 0x9a + n, 0x3c + n / 2)
+            } else {
+                (0x79 + n, 0x55 + n, 0x3a + n / 2)
+            };
+            let edge = x < 2 || y < 2 || x >= N - 2 || y >= N - 2;
+            let (r, g, b) = if edge {
+                (r / 2, g / 2, b / 2)
+            } else {
+                (r, g, b)
+            };
+            rgba[i] = r.clamp(0, 255) as u8;
+            rgba[i + 1] = g.clamp(0, 255) as u8;
+            rgba[i + 2] = b.clamp(0, 255) as u8;
+            rgba[i + 3] = 255;
+        }
+    }
+    egui::IconData {
+        rgba,
+        width: N as u32,
+        height: N as u32,
+    }
+}
+
+/// Tiny grass block glyph used next to the title.
+fn paint_block(painter: &egui::Painter, rect: egui::Rect) {
+    let r = rect.shrink(2.0);
+    painter.rect_filled(r, 3.0, Color32::from_rgb(0x79, 0x55, 0x3a));
+    let top = egui::Rect::from_min_size(r.min, egui::vec2(r.width(), r.height() * 0.38));
+    painter.rect_filled(
+        top,
+        egui::CornerRadius {
+            nw: 3,
+            ne: 3,
+            sw: 0,
+            se: 0,
+        },
+        ACCENT_HOVER,
+    );
 }
 
 fn parse_res(s: &str) -> Option<Resolution> {

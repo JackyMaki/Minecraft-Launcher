@@ -64,7 +64,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Build
+        env:
+          # Optional: your Mojang-approved Azure application id. Add it as the
+          # repository secret MSA_CLIENT_ID and every release build gets
+          # Microsoft sign-in without any user setup.
+          MC_LAUNCHER_DEFAULT_CLIENT_ID: ${{ secrets.MSA_CLIENT_ID }}
+        run: cargo build --release --target ${{ matrix.target }}
       - name: Rename
         shell: bash
         run: cp target/${{ matrix.target }}/release/${{ matrix.artifact }} ${{ matrix.name }}

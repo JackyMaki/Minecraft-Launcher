@@ -12,6 +12,13 @@ fn sha1(data: &[u8]) -> String {
     minecraft_launcher::download::sha1_hex(data)
 }
 
+fn jar_with_main(main: &str, entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let manifest = format!("Manifest-Version: 1.0\nMain-Class: {main}\n\n");
+    let mut all: Vec<(&str, &[u8])> = vec![("META-INF/MANIFEST.MF", manifest.as_bytes())];
+    all.extend_from_slice(entries);
+    jar(&all)
+}
+
 fn jar(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut buf = std::io::Cursor::new(Vec::new());
     {
@@ -34,38 +41,69 @@ struct Mock {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// A minimal HTTP/1.1 server: one thread per connection, one request per
+/// connection (`Connection: close`). Deterministic under parallel load.
 impl Mock {
     fn start() -> Self {
-        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
-        let port = server.server_addr().to_ip().unwrap().port();
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
         let files: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::default();
         let hits: Arc<Mutex<Vec<String>>> = Arc::default();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        // Several worker threads so parallel keep-alive downloads are served.
-        let mut workers = Vec::new();
-        for _ in 0..8 {
-            let (server, f, h, s) = (server.clone(), files.clone(), hits.clone(), stop.clone());
-            workers.push(std::thread::spawn(move || {
-                while !s.load(std::sync::atomic::Ordering::Relaxed) {
-                    let Ok(Some(req)) = server.recv_timeout(std::time::Duration::from_millis(50))
-                    else {
-                        continue;
-                    };
-                    let path = req.url().split('?').next().unwrap().to_string();
-                    h.lock().unwrap().push(path.clone());
-                    let body = f.lock().unwrap().get(&path).cloned();
-                    match body {
-                        Some(b) => req.respond(tiny_http::Response::from_data(b)).unwrap(),
-                        None => req
-                            .respond(
-                                tiny_http::Response::from_string("not found").with_status_code(404),
-                            )
-                            .unwrap(),
-                    }
-                }
-            }));
-        }
+        let (f, h, s) = (files.clone(), hits.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
+            let mut workers = Vec::new();
+            while !s.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let (f, h) = (f.clone(), h.clone());
+                        workers.push(std::thread::spawn(move || {
+                            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+                            let mut reader = BufReader::new(stream.try_clone().unwrap());
+                            let mut line = String::new();
+                            if reader.read_line(&mut line).is_err() || line.is_empty() {
+                                return;
+                            }
+                            let mut content_length = 0usize;
+                            loop {
+                                let mut hdr = String::new();
+                                if reader.read_line(&mut hdr).is_err() || hdr == "\r\n" || hdr == "\n" || hdr.is_empty() {
+                                    break;
+                                }
+                                if let Some(v) = hdr.to_ascii_lowercase().strip_prefix("content-length:") {
+                                    content_length = v.trim().parse().unwrap_or(0);
+                                }
+                            }
+                            if content_length > 0 {
+                                let mut body = vec![0u8; content_length];
+                                let _ = reader.read_exact(&mut body);
+                            }
+                            let target = line.split_whitespace().nth(1).unwrap_or("/");
+                            let path = target.split('?').next().unwrap().to_string();
+                            h.lock().unwrap().push(path.clone());
+                            let body = f.lock().unwrap().get(&path).cloned();
+                            let (status, body) = match body {
+                                Some(b) => ("200 OK", b),
+                                None => ("404 Not Found", b"not found".to_vec()),
+                            };
+                            let mut stream = stream;
+                            let head = format!(
+                                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(head.as_bytes());
+                            let _ = stream.write_all(&body);
+                            let _ = stream.flush();
+                        }));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
             for w in workers {
                 let _ = w.join();
             }
@@ -265,6 +303,43 @@ fn populate(mock: &Mock) -> String {
         serde_json::to_vec(&fabric_profile).unwrap(),
     );
 
+    // Quilt meta: same shape as Fabric's.
+    mock.put(
+        "/quilt/versions/loader/mock-1.21",
+        serde_json::to_vec(&serde_json::json!([
+            {"loader": {"version": "0.27.0", "stable": true}}
+        ]))
+        .unwrap(),
+    );
+    let quilt_profile = serde_json::json!({
+        "id": "quilt-loader-0.27.0-mock-1.21",
+        "inheritsFrom": "mock-1.21",
+        "type": "release",
+        "mainClass": "Main",
+        "arguments": {"game": ["--quiltMarker"], "jvm": []},
+        "libraries": [{"name": "net.mockfabric:loader:0.1", "url": format!("{}/maven/", mock.base)}]
+    });
+    mock.put(
+        "/quilt/versions/loader/mock-1.21/0.27.0/profile/json",
+        serde_json::to_vec(&quilt_profile).unwrap(),
+    );
+
+    // Forge: promotions + a stand-in installer jar that behaves like the real one.
+    let installer_class = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mockmc/Installer.class"),
+    )
+    .unwrap();
+    let installer = jar_with_main("Installer", &[("Installer.class", &installer_class[..])]);
+    mock.put(
+        "/forgefiles/promotions_slim.json",
+        serde_json::to_vec(&serde_json::json!({"promos": {"mock-1.21-recommended": "52.0.1"}}))
+            .unwrap(),
+    );
+    mock.put(
+        "/forgemaven/mock-1.21-52.0.1/forge-mock-1.21-52.0.1-installer.jar",
+        installer,
+    );
+
     // Modrinth: every performance mod resolves to a small jar; sodium depends on fabric-api's project id.
     let mod_jar = jar(&[("mod.txt", b"mod")]);
     let (_, mod_sha, mod_size) = mock.put("/mods/generic.jar", mod_jar);
@@ -313,6 +388,15 @@ fn env_for(cmd: &mut Command, root: &Path, mock: &Mock, manifest_url: &str) {
         .env(
             "MC_LAUNCHER_MODRINTH_URL",
             format!("{}/modrinth", mock.base),
+        )
+        .env("MC_LAUNCHER_QUILT_META_URL", format!("{}/quilt", mock.base))
+        .env(
+            "MC_LAUNCHER_FORGE_FILES_URL",
+            format!("{}/forgefiles", mock.base),
+        )
+        .env(
+            "MC_LAUNCHER_FORGE_MAVEN_URL",
+            format!("{}/forgemaven", mock.base),
         )
         .env(
             "MC_LAUNCHER_JAVA_MANIFEST_URL",
@@ -536,6 +620,93 @@ fn install_launch_quickplay_fabric_and_warm_start() {
         .unwrap();
     assert_eq!(fast["lastVersionId"], "latest-release");
     assert_eq!(fast["resolution"]["width"], 1280);
+
+    // 4b. Quilt profile: meta-based install like Fabric, Modrinth queried for quilt+fabric builds.
+    let mut c = bin();
+    env_for(&mut c, &root, &mock, &manifest_url);
+    let (ok, out) = run(c.args([
+        "profile",
+        "add",
+        "Quilty",
+        "--version",
+        "mock-1.21",
+        "--loader",
+        "quilt",
+    ]));
+    assert!(ok, "{out}");
+    let mut c = bin();
+    env_for(&mut c, &root, &mock, &manifest_url);
+    let (ok, out) = run(c.args(["launch", "Quilty", "--offline", "Steve"]));
+    assert!(ok, "{out}");
+    let args = read_args(&root);
+    assert_eq!(
+        arg_after(&args, "--version").as_deref(),
+        Some("quilt-loader-0.27.0-mock-1.21")
+    );
+    assert!(args.iter().any(|a| a == "--quiltMarker"));
+    assert!(root
+        .join("versions/quilt-loader-0.27.0-mock-1.21/quilt-loader-0.27.0-mock-1.21.json")
+        .is_file());
+    assert!(root.join("mods/.launcher_mods.json").is_file());
+    let managed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("mods/.launcher_mods.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(managed["loader"], "quilt");
+
+    // 4c. Forge profile: runs the (mock) official installer headlessly, keeps our profiles file.
+    let mut c = bin();
+    env_for(&mut c, &root, &mock, &manifest_url);
+    let (ok, out) = run(c.args([
+        "profile",
+        "add",
+        "Forgey",
+        "--version",
+        "mock-1.21",
+        "--loader",
+        "forge",
+        "--no-perf-mods",
+    ]));
+    assert!(ok, "{out}");
+    let mut c = bin();
+    env_for(&mut c, &root, &mock, &manifest_url);
+    let (ok, out) = run(c.args(["launch", "Forgey", "--offline", "Steve"]));
+    assert!(ok, "{out}");
+    assert!(out.contains("Running Forge installer"), "{out}");
+    assert!(out.contains("installed successfully"), "{out}");
+    let args = read_args(&root);
+    assert_eq!(
+        arg_after(&args, "--version").as_deref(),
+        Some("mock-1.21-forge-52.0.1")
+    );
+    assert!(args.iter().any(|a| a == "--forgeMarker"));
+    assert!(
+        root.join("libraries/net/mockforge/forge/52.0.1/forge-52.0.1-client.jar")
+            .is_file(),
+        "installer-generated library accepted without a URL"
+    );
+    let lp: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("launcher_profiles.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        lp["profiles"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|p| p["name"] == "Forgey"),
+        "our profiles survived the installer: {lp}"
+    );
+    assert!(
+        !lp["profiles"].as_object().unwrap().contains_key("forge"),
+        "installer's junk profile dropped"
+    );
+    // Second launch reuses the installed Forge version without running the installer again.
+    let mut c = bin();
+    env_for(&mut c, &root, &mock, &manifest_url);
+    let (ok, out) = run(c.args(["launch", "Forgey", "--offline", "Steve", "--dry-run"]));
+    assert!(ok, "{out}");
+    assert!(!out.contains("Running Forge installer"), "{out}");
 
     // 5. Warm start with the network gone: dry-run must succeed quickly without any request.
     mock.stop();

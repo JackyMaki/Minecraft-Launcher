@@ -23,13 +23,20 @@ are picked up unchanged. Switching back is a one-click affair.
     start-up.
   - *Max*: generational ZGC on Java 21+ for the fewest stutters, bigger heap.
   - *Vanilla*: exactly what the official launcher passes.
-- **Performance pack.** Pick *Fabric* for a profile and the launcher installs
-  Fabric loader plus a curated set of client-side performance mods from
-  Modrinth: Sodium, Lithium, FerriteCore, ImmediatelyFast, Entity Culling,
-  ModernFix, Dynamic FPS, Krypton and C2ME. These are what make a big
-  difference: higher and steadier FPS, much faster game start-up (ModernFix),
-  faster chunk loading so worlds open quicker (C2ME), quicker server joins
-  (Krypton). No gameplay changes.
+- **Every mod loader.** Vanilla, Fabric, Quilt, Forge, NeoForge and Legacy
+  Fabric (Fabric for 1.3 to 1.13), selectable per profile. Fabric, Quilt and
+  Legacy Fabric install from their meta servers in a fraction of a second;
+  Forge and NeoForge are installed by running their official installers
+  headlessly, exactly as the Forge documentation recommends. The latest
+  stable or recommended loader build is picked automatically, or pin one.
+- **Performance pack.** Pick any modded loader and the launcher installs a
+  curated set of client-side performance mods from Modrinth: Sodium, Lithium,
+  FerriteCore, ImmediatelyFast, Entity Culling, ModernFix, Dynamic FPS,
+  Krypton and C2ME. These are what make a big difference: higher and
+  steadier FPS, much faster game start-up (ModernFix), faster chunk loading
+  so worlds open quicker (C2ME), quicker server joins (Krypton). No gameplay
+  changes. Mods that have no build for the chosen loader and version are
+  skipped automatically.
 - **Quick Play: straight into a world or server.** A profile can be set to
   skip all menus and open a singleplayer world, join a server, or join a Realm
   the moment the game starts (Minecraft 1.20+ Quick Play; older versions fall
@@ -56,7 +63,9 @@ straight to where you want to be.
 
 ## Install
 
-Grab a build from the Releases page (Windows, macOS, Linux) or build it
+Grab a build from the Releases page (Windows, macOS Apple Silicon and Intel,
+Linux), put it anywhere and run it. There is nothing to install and it never
+touches your game files except through the normal game folder. Or build it
 yourself:
 
 ```sh
@@ -69,11 +78,31 @@ available with `cargo build --release --no-default-features`.
 
 Running `mclauncher` without arguments opens the GUI.
 
+## Mod loaders
+
+| Loader | Versions | How it is installed |
+| --- | --- | --- |
+| Fabric | 1.14+ | meta.fabricmc.net profile JSON |
+| Quilt | 1.14+ | meta.quiltmc.org profile JSON; runs Fabric mods too |
+| Legacy Fabric | 1.3 to 1.13 | meta.legacyfabric.net profile JSON |
+| Forge | 1.12.2+ (new-style installers) | official installer, `--installClient` |
+| NeoForge | 1.20.2+ | official installer, `--installClient` |
+
+For Forge versions older than 1.12.2 run the Forge installer yourself once;
+the resulting version folder shows up under *Installed custom versions* in
+the version picker. The same works for OptiFine, or anything else that drops
+a folder into `versions/`.
+
 ## Microsoft login
 
 Microsoft requires every third-party launcher to use its own Azure
 application id, approved for the Minecraft API. Mojang does not allow shipping
-someone else's id, so this launcher ships without one. One-time setup:
+someone else's id.
+
+**If you downloaded a release build** that was published with an approved id,
+sign-in just works: *Accounts → Sign in with Microsoft*.
+
+**If you build it yourself**, or no id was baked in, do the one-time setup:
 
 1. Create an app registration in the Azure portal (any personal Microsoft
    account works). Supported account types: *Personal Microsoft accounts
@@ -87,6 +116,11 @@ someone else's id, so this launcher ships without one. One-time setup:
 Then *Accounts → Sign in with Microsoft*. A code is shown and your browser
 opens; enter the code and sign in. Tokens are refreshed automatically.
 
+**Publishing builds for other people:** add your approved id as the GitHub
+repository secret `MSA_CLIENT_ID`. The release workflow compiles it into the
+binaries (`MC_LAUNCHER_DEFAULT_CLIENT_ID` at build time), so your users never
+see this section. Settings and the environment variable still override it.
+
 Offline accounts (no purchase check) work in singleplayer and on servers with
 `online-mode=false`.
 
@@ -95,16 +129,17 @@ Offline accounts (no purchase check) work in singleplayer and on servers with
 ```text
 mclauncher                      open the GUI
 mclauncher versions [-s] [-a]   list versions (snapshots / all)
-mclauncher install 1.21.1 [--fabric]
+mclauncher install 1.21.1 [--loader fabric|quilt|forge|neoforge|legacyfabric]
 mclauncher login [--offline NAME]
-mclauncher profile add "Survival" --version 1.21.1 --fabric --world "My World"
+mclauncher profile add "Survival" --version 1.21.1 --loader fabric --world "My World"
+mclauncher profile add "Packs" --version 1.20.1 --loader forge --no-perf-mods
 mclauncher profile add "Hypixel" --version 1.8.9 --server mc.hypixel.net --preset max
 mclauncher profile list | set | remove | select
 mclauncher launch [PROFILE] [--world W | --server HOST[:PORT] | --realm ID]
-                  [--version V] [--offline NAME] [--preset vanilla|smooth|max]
+                  [--version V] [--loader L] [--offline NAME] [--preset vanilla|smooth|max]
                   [--memory MiB] [--dry-run] [--detach]
 mclauncher worlds [PROFILE]     list worlds and saved servers for Quick Play
-mclauncher mods PROFILE [slugs] install Modrinth mods into a Fabric profile
+mclauncher mods PROFILE [slugs] install Modrinth mods into a modded profile
 mclauncher java                 show detected Java installations
 mclauncher settings [key=value]
 ```
@@ -158,10 +193,14 @@ cargo test --no-default-features # same, without compiling the GUI
 cargo clippy --all-targets
 ```
 
-The end-to-end test starts a local mock of Mojang's, Fabric's and Modrinth's
-servers plus a tiny stand-in Minecraft jar, then drives the real binary
-through install, Quick Play, Fabric and a network-free warm start. It needs a
-`java` on the `PATH` and skips itself otherwise.
+The end-to-end test starts a local mock of Mojang's, Fabric's, Quilt's,
+Forge's and Modrinth's servers plus tiny stand-in Minecraft and Forge
+installer jars, then drives the real binary through install, Quick Play,
+every loader and a network-free warm start. It needs a `java` on the `PATH`
+and skips itself otherwise.
+
+To publish a release: merge to `main`, then push a tag such as `v0.1.0`. The
+workflow builds all four binaries and attaches them to a GitHub Release.
 
 ## License
 

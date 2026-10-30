@@ -55,13 +55,93 @@ pub enum Loader {
     #[default]
     Vanilla,
     Fabric,
+    Quilt,
+    /// Fabric for 1.3 - 1.13 via meta.legacyfabric.net.
+    #[serde(rename = "legacyfabric")]
+    LegacyFabric,
+    Forge,
+    #[serde(rename = "neoforge")]
+    NeoForge,
 }
 
 impl Loader {
+    pub const ALL: [Loader; 6] = [
+        Loader::Vanilla,
+        Loader::Fabric,
+        Loader::Quilt,
+        Loader::Forge,
+        Loader::NeoForge,
+        Loader::LegacyFabric,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Loader::Vanilla => "Vanilla",
-            Loader::Fabric => "Fabric (mods, performance pack)",
+            Loader::Fabric => "Fabric",
+            Loader::Quilt => "Quilt",
+            Loader::LegacyFabric => "Legacy Fabric (1.3 - 1.13)",
+            Loader::Forge => "Forge",
+            Loader::NeoForge => "NeoForge",
+        }
+    }
+
+    /// Short description for the GUI.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Loader::Vanilla => "No mods. Fastest to install.",
+            Loader::Fabric => "Lightweight modern loader. Best choice for the performance pack.",
+            Loader::Quilt => "Fabric-compatible loader; runs Fabric mods too.",
+            Loader::LegacyFabric => "Fabric ported to old versions (1.3 to 1.13).",
+            Loader::Forge => {
+                "The classic loader for big mod packs. Installed with Forge's own installer."
+            }
+            Loader::NeoForge => {
+                "Modern fork of Forge (1.20.2+). Installed with NeoForge's own installer."
+            }
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Loader::Vanilla => "vanilla",
+            Loader::Fabric => "fabric",
+            Loader::Quilt => "quilt",
+            Loader::LegacyFabric => "legacyfabric",
+            Loader::Forge => "forge",
+            Loader::NeoForge => "neoforge",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', '_', ' '], "")
+            .as_str()
+        {
+            "vanilla" | "none" => Some(Loader::Vanilla),
+            "fabric" => Some(Loader::Fabric),
+            "quilt" => Some(Loader::Quilt),
+            "legacyfabric" => Some(Loader::LegacyFabric),
+            "forge" => Some(Loader::Forge),
+            "neoforge" => Some(Loader::NeoForge),
+            _ => None,
+        }
+    }
+
+    pub fn is_modded(self) -> bool {
+        self != Loader::Vanilla
+    }
+
+    /// Modrinth loader names to query for this loader, in order of preference.
+    pub fn modrinth_loaders(self) -> &'static [&'static str] {
+        match self {
+            Loader::Vanilla => &[],
+            Loader::Fabric => &["fabric"],
+            Loader::Quilt => &["quilt", "fabric"],
+            Loader::LegacyFabric => &["legacy-fabric", "fabric"],
+            Loader::Forge => &["forge"],
+            Loader::NeoForge => &["neoforge"],
         }
     }
 }
@@ -92,8 +172,9 @@ pub struct ProfileExtra {
     pub perf_mods: bool,
     /// Extra Modrinth project slugs to install (Fabric only).
     pub extra_mods: Vec<String>,
-    /// Pinned Fabric loader version (empty = latest stable).
-    pub fabric_loader: String,
+    /// Pinned loader version (empty = latest stable/recommended).
+    #[serde(alias = "fabric_loader")]
+    pub loader_version: String,
 }
 
 impl Default for ProfileExtra {
@@ -105,7 +186,7 @@ impl Default for ProfileExtra {
             quick_play: QuickPlay::None,
             perf_mods: true,
             extra_mods: Vec::new(),
-            fabric_loader: String::new(),
+            loader_version: String::new(),
         }
     }
 }

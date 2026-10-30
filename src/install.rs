@@ -89,14 +89,21 @@ pub fn install_version(
     report(sink, Progress::Phase("Checking libraries".into()));
     let libs = version.library_files(&ctx)?;
     let lib_dir = paths.libraries();
-    let mut tasks: Vec<Task> = libs
-        .iter()
-        .map(|l| {
-            Task::new(&l.url, lib_dir.join(&l.path))
-                .sha1(l.sha1.clone())
-                .size(l.size)
-        })
-        .collect();
+    let mut tasks: Vec<Task> = Vec::with_capacity(libs.len() + 2);
+    for l in &libs {
+        let dest = lib_dir.join(&l.path);
+        if l.url.is_empty() {
+            // Forge/NeoForge generate some jars locally with their installer.
+            if !dest.is_file() {
+                return Err(anyhow!(
+                    "library {} is missing and has no download URL; re-run the loader installer",
+                    l.path
+                ));
+            }
+            continue;
+        }
+        tasks.push(Task::new(&l.url, dest).sha1(l.sha1.clone()).size(l.size));
+    }
     let jar_id = version.jar_id().to_string();
     if let Some(client) = version.downloads.as_ref().and_then(|d| d.get("client")) {
         tasks.push(
@@ -205,48 +212,61 @@ pub fn prepare_profile(
         }
     }
 
-    match profile.extra.loader {
-        Loader::Vanilla => install_version(paths, manifest, &base_id, &game_dir, &opts, sink),
-        Loader::Fabric => {
-            // Vanilla files first (Fabric inherits them), then the loader profile.
+    if profile.extra.loader == Loader::Vanilla {
+        return install_version(paths, manifest, &base_id, &game_dir, &opts, sink);
+    }
+
+    // Modded: vanilla files first (every loader inherits them), then the loader.
+    let loader = profile.extra.loader;
+    let pinned = if profile.extra.loader_version.trim().is_empty() {
+        None
+    } else {
+        Some(profile.extra.loader_version.trim())
+    };
+    let modded_id = match crate::fabric::Flavor::for_loader(loader) {
+        Some(flavor) => {
             ensure_version_json(paths, manifest, &base_id, opts.verify)?;
             report(
                 sink,
-                Progress::Phase(format!("Fabric loader for {base_id}")),
+                Progress::Phase(format!("{} loader for {base_id}", loader.label())),
             );
-            let pinned = if profile.extra.fabric_loader.is_empty() {
-                None
+            crate::fabric::install(paths, flavor, &base_id, pinned)?
+        }
+        None => {
+            // Forge / NeoForge need the vanilla client fully installed and a Java to run their installer.
+            if let Some(id) = crate::forge::installed_for(paths, loader, &base_id, pinned) {
+                id
             } else {
-                Some(profile.extra.fabric_loader.as_str())
-            };
-            let fabric_id = crate::fabric::install(paths, &base_id, pinned)?;
-            let mut installed =
-                install_version(paths, manifest, &fabric_id, &game_dir, &opts, sink)?;
-            installed.modded = true;
-            let mut slugs: Vec<String> = Vec::new();
-            if profile.extra.perf_mods {
-                slugs.extend(crate::mods::PERF_MODS.iter().map(|(s, _)| s.to_string()));
+                let vanilla = install_version(paths, manifest, &base_id, &game_dir, &opts, sink)?;
+                crate::forge::install(paths, loader, &base_id, pinned, &vanilla.java, sink)?
             }
-            for m in &profile.extra.extra_mods {
-                if let Ok(s) = crate::mods::validate_slug(m) {
-                    if !slugs.contains(&s) {
-                        slugs.push(s);
-                    }
-                }
+        }
+    };
+    let mut installed = install_version(paths, manifest, &modded_id, &game_dir, &opts, sink)?;
+    installed.modded = true;
+
+    let mut slugs: Vec<String> = Vec::new();
+    if profile.extra.perf_mods {
+        slugs.extend(crate::mods::PERF_MODS.iter().map(|(s, _)| s.to_string()));
+    }
+    for m in &profile.extra.extra_mods {
+        if let Ok(s) = crate::mods::validate_slug(m) {
+            if !slugs.contains(&s) {
+                slugs.push(s);
             }
-            if !slugs.is_empty() {
-                crate::mods::install(
-                    paths,
-                    &game_dir.join("mods"),
-                    &slugs,
-                    &base_id,
-                    "fabric",
-                    opts.verify,
-                    opts.parallel,
-                    sink,
-                )?;
-            }
-            Ok(installed)
         }
     }
+    if !slugs.is_empty() {
+        crate::mods::install(
+            paths,
+            &game_dir.join("mods"),
+            &slugs,
+            &base_id,
+            loader,
+            opts.verify,
+            opts.parallel,
+            sink,
+        )?;
+    }
+    Ok(installed)
 }

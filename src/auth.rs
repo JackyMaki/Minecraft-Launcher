@@ -170,7 +170,12 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Where the Microsoft client id comes from.
+/// Client id compiled into this build (set `MC_LAUNCHER_DEFAULT_CLIENT_ID`
+/// at build time; release builds get it from a repository secret).
+pub const BUILT_IN_CLIENT_ID: Option<&str> = option_env!("MC_LAUNCHER_DEFAULT_CLIENT_ID");
+
+/// Where the Microsoft client id comes from: environment, then settings,
+/// then the id compiled into the binary.
 pub fn msa_client_id(settings_client_id: Option<&str>) -> Result<String> {
     if let Ok(v) = std::env::var("MC_LAUNCHER_MSA_CLIENT_ID") {
         if !v.trim().is_empty() {
@@ -178,6 +183,11 @@ pub fn msa_client_id(settings_client_id: Option<&str>) -> Result<String> {
         }
     }
     if let Some(v) = settings_client_id {
+        if !v.trim().is_empty() {
+            return Ok(v.trim().to_string());
+        }
+    }
+    if let Some(v) = BUILT_IN_CLIENT_ID {
         if !v.trim().is_empty() {
             return Ok(v.trim().to_string());
         }

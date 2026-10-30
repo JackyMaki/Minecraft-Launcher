@@ -8,6 +8,7 @@ pub mod assets;
 pub mod auth;
 pub mod download;
 pub mod fabric;
+pub mod forge;
 pub mod http;
 pub mod install;
 pub mod java;
@@ -44,6 +45,9 @@ pub enum Progress {
 pub type ProgressSink = Option<std::sync::mpsc::Sender<Progress>>;
 
 pub fn report(sink: &ProgressSink, p: Progress) {
+    if let Progress::Phase(s) = &p {
+        log::debug!("phase: {s}");
+    }
     if let Some(tx) = sink {
         let _ = tx.send(p);
     }

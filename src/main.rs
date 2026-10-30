@@ -49,7 +49,10 @@ enum Cmd {
     Install {
         /// Version id, `latest-release` or `latest-snapshot`.
         version: String,
-        /// Install Fabric loader for it too.
+        /// Mod loader: fabric, quilt, forge, neoforge, legacyfabric.
+        #[arg(long)]
+        loader: Option<String>,
+        /// Shorthand for `--loader fabric`.
         #[arg(long)]
         fabric: bool,
         /// Re-hash every file.
@@ -81,7 +84,7 @@ enum Cmd {
         /// Profile whose game directory to inspect.
         profile: Option<String>,
     },
-    /// Install mods from Modrinth into a profile's mods folder (Fabric).
+    /// Install mods from Modrinth into a modded profile's mods folder.
     Mods {
         /// Profile name.
         profile: String,
@@ -102,7 +105,10 @@ struct LaunchArgs {
     /// Launch this version instead of the profile's.
     #[arg(long)]
     version: Option<String>,
-    /// Use Fabric for an ad-hoc `--version` launch.
+    /// Mod loader for an ad-hoc `--version` launch: fabric, quilt, forge, neoforge, legacyfabric.
+    #[arg(long)]
+    loader: Option<String>,
+    /// Shorthand for `--loader fabric`.
     #[arg(long)]
     fabric: bool,
     /// Jump straight into this singleplayer world (save folder name).
@@ -144,8 +150,15 @@ enum ProfileCmd {
         /// Version id, `latest-release` or `latest-snapshot`.
         #[arg(long, default_value = "latest-release")]
         version: String,
+        /// Mod loader: fabric, quilt, forge, neoforge, legacyfabric (default: vanilla).
+        #[arg(long)]
+        loader: Option<String>,
+        /// Shorthand for `--loader fabric`.
         #[arg(long)]
         fabric: bool,
+        /// Pin a loader version (default: latest stable / recommended).
+        #[arg(long)]
+        loader_version: Option<String>,
         /// vanilla | smooth | max
         #[arg(long, default_value = "smooth")]
         preset: String,
@@ -174,8 +187,11 @@ enum ProfileCmd {
         rename: Option<String>,
         #[arg(long)]
         version: Option<String>,
+        /// vanilla, fabric, quilt, forge, neoforge, legacyfabric
         #[arg(long)]
-        fabric: Option<bool>,
+        loader: Option<String>,
+        #[arg(long)]
+        loader_version: Option<String>,
         #[arg(long)]
         preset: Option<String>,
         #[arg(long)]
@@ -215,7 +231,7 @@ fn main() {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or(if cli.verbose { "debug" } else { "warn" }),
     )
-    .format_timestamp(None)
+    .format_timestamp_millis()
     .init();
     let paths = cli
         .root
@@ -273,17 +289,14 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
         }
         Cmd::Install {
             version,
+            loader,
             fabric,
             verify,
         } => {
             let settings = Settings::load(&paths);
             let manifest = load_manifest(&paths, false).ok();
             let mut p = Profile::new("install", &version);
-            p.extra.loader = if fabric {
-                Loader::Fabric
-            } else {
-                Loader::Vanilla
-            };
+            p.extra.loader = parse_loader(loader.as_deref(), fabric)?;
             let mut opts = minecraft_launcher::install::InstallOptions::from(&settings);
             opts.verify = verify;
             let (tx, rx) = mpsc::channel();
@@ -393,8 +406,10 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
                 .find(&profile)
                 .ok_or_else(|| anyhow!("no profile '{profile}'"))?
                 .clone();
-            if p.extra.loader != Loader::Fabric {
-                return Err(anyhow!("profile '{profile}' is not a Fabric profile (use `profile set {profile} --fabric true`)"));
+            if !p.extra.loader.is_modded() {
+                return Err(anyhow!(
+                    "profile '{profile}' is vanilla (use `profile set {profile} --loader fabric` first)"
+                ));
             }
             let game = manifest
                 .as_ref()
@@ -425,7 +440,7 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
                 &p.game_dir(&paths).join("mods"),
                 &all,
                 &game,
-                "fabric",
+                p.extra.loader,
                 false,
                 settings.parallel_downloads,
                 &Some(tx),
@@ -465,6 +480,16 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
             println!("game directory: {}", paths.root.display());
             Ok(())
         }
+    }
+}
+
+fn parse_loader(loader: Option<&str>, fabric: bool) -> Result<Loader> {
+    match loader {
+        Some(l) => Loader::parse(l).ok_or_else(|| {
+            anyhow!("unknown loader '{l}' (vanilla, fabric, quilt, forge, neoforge, legacyfabric)")
+        }),
+        None if fabric => Ok(Loader::Fabric),
+        None => Ok(Loader::Vanilla),
     }
 }
 
@@ -557,11 +582,7 @@ fn launch(paths: &Paths, a: LaunchArgs) -> Result<()> {
             .clone(),
         (None, Some(v)) => {
             let mut p = Profile::new(&format!("Ad-hoc {v}"), v);
-            p.extra.loader = if a.fabric {
-                Loader::Fabric
-            } else {
-                Loader::Vanilla
-            };
+            p.extra.loader = parse_loader(a.loader.as_deref(), a.fabric)?;
             p
         }
         (None, None) => profiles
@@ -571,8 +592,8 @@ fn launch(paths: &Paths, a: LaunchArgs) -> Result<()> {
     };
     if let Some(v) = &a.version {
         profile.official.last_version_id = v.clone();
-        if a.fabric {
-            profile.extra.loader = Loader::Fabric;
+        if a.loader.is_some() || a.fabric {
+            profile.extra.loader = parse_loader(a.loader.as_deref(), a.fabric)?;
         }
     }
 
@@ -613,6 +634,7 @@ fn launch(paths: &Paths, a: LaunchArgs) -> Result<()> {
         demo: a.demo,
     };
 
+    log::debug!("launching profile {}", profile.display_name());
     let planned = session::plan(
         paths,
         &settings,
@@ -679,10 +701,10 @@ fn profile_cmd(paths: &Paths, cmd: ProfileCmd) -> Result<()> {
                     QuickPlay::Realms { id } => format!("  -> realm {id}"),
                 };
                 println!(
-                    "{sel} {:<24} {:<22} {:<7} {:<8}{qp}",
+                    "{sel} {:<24} {:<22} {:<12} {:<8}{qp}",
                     p.display_name(),
                     p.official.last_version_id,
-                    format!("{:?}", p.extra.loader).to_lowercase(),
+                    p.extra.loader.id(),
                     format!("{:?}", p.extra.perf).to_lowercase()
                 );
             }
@@ -690,7 +712,9 @@ fn profile_cmd(paths: &Paths, cmd: ProfileCmd) -> Result<()> {
         ProfileCmd::Add {
             name,
             version,
+            loader,
             fabric,
+            loader_version,
             preset,
             memory,
             world,
@@ -704,11 +728,8 @@ fn profile_cmd(paths: &Paths, cmd: ProfileCmd) -> Result<()> {
                 return Err(anyhow!("a profile named '{name}' already exists"));
             }
             let mut p = Profile::new(&name, &version);
-            p.extra.loader = if fabric {
-                Loader::Fabric
-            } else {
-                Loader::Vanilla
-            };
+            p.extra.loader = parse_loader(loader.as_deref(), fabric)?;
+            p.extra.loader_version = loader_version.unwrap_or_default();
             p.extra.perf =
                 PerfPreset::parse(&preset).ok_or_else(|| anyhow!("unknown preset '{preset}'"))?;
             p.extra.memory_mb = memory.unwrap_or(0);
@@ -730,7 +751,8 @@ fn profile_cmd(paths: &Paths, cmd: ProfileCmd) -> Result<()> {
             name,
             rename,
             version,
-            fabric,
+            loader,
+            loader_version,
             preset,
             memory,
             world,
@@ -753,8 +775,11 @@ fn profile_cmd(paths: &Paths, cmd: ProfileCmd) -> Result<()> {
             if let Some(v) = version {
                 p.official.last_version_id = v;
             }
-            if let Some(f) = fabric {
-                p.extra.loader = if f { Loader::Fabric } else { Loader::Vanilla };
+            if let Some(l) = loader {
+                p.extra.loader = parse_loader(Some(&l), false)?;
+            }
+            if let Some(lv) = loader_version {
+                p.extra.loader_version = lv;
             }
             if let Some(pr) = preset {
                 p.extra.perf =

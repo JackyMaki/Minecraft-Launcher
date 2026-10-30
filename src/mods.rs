@@ -4,6 +4,7 @@
 use crate::download::Task;
 use crate::http;
 use crate::paths::{write_atomic, Paths};
+use crate::profiles::Loader;
 use crate::{report, Progress, ProgressSink};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -95,6 +96,9 @@ pub struct ManagedMods {
     /// game version these entries were resolved for
     #[serde(default)]
     pub game_version: String,
+    /// loader these entries were resolved for
+    #[serde(default)]
+    pub loader: String,
     /// project id (or slug) -> file name
     #[serde(default)]
     pub files: BTreeMap<String, String>,
@@ -119,22 +123,28 @@ impl ManagedMods {
     }
 }
 
-/// Newest compatible version of a project for `game`/`loader`.
+/// Newest compatible version of a project for `game` on any of `loaders`.
 pub fn resolve(
     paths: &Paths,
     project: &str,
     game: &str,
-    loader: &str,
+    loaders: &[&str],
 ) -> Result<Option<ModVersion>> {
+    let loaders_q = loaders
+        .iter()
+        .map(|l| format!("%22{l}%22"))
+        .collect::<Vec<_>>()
+        .join("%2C");
     let url = format!(
-        "{}/project/{project}/version?loaders=%5B%22{loader}%22%5D&game_versions=%5B%22{}%22%5D",
+        "{}/project/{project}/version?loaders=%5B{loaders_q}%5D&game_versions=%5B%22{}%22%5D",
         api_base(),
         urlencode(game)
     );
-    let cache = paths
-        .cache_dir()
-        .join("modrinth")
-        .join(format!("{project}_{loader}_{}.json", sanitize(game)));
+    let cache = paths.cache_dir().join("modrinth").join(format!(
+        "{project}_{}_{}.json",
+        loaders.join("-"),
+        sanitize(game)
+    ));
     let list: Vec<ModVersion> = http::get_json_cached(&url, &cache, Duration::from_secs(24 * 3600))
         .with_context(|| format!("querying Modrinth for {project}"))?;
     if list.is_empty() {
@@ -168,14 +178,16 @@ pub fn install(
     mods_dir: &Path,
     slugs: &[String],
     game: &str,
-    loader: &str,
+    loader: Loader,
     verify: bool,
     parallel: usize,
     sink: &ProgressSink,
 ) -> Result<Vec<String>> {
     std::fs::create_dir_all(mods_dir)?;
     let mut managed = ManagedMods::load(mods_dir);
+    let loaders = loader.modrinth_loaders();
     let fast_path = managed.game_version == game
+        && managed.loader == loader.id()
         && slugs.iter().all(|s| managed.files.contains_key(s))
         && managed.files.values().all(|f| mods_dir.join(f).is_file())
         && !verify;
@@ -185,7 +197,11 @@ pub fn install(
 
     report(
         sink,
-        Progress::Phase(format!("Resolving {} mod(s) for {game}", slugs.len())),
+        Progress::Phase(format!(
+            "Resolving {} mod(s) for {game} ({})",
+            slugs.len(),
+            loader.label()
+        )),
     );
     let mut tasks: Vec<Task> = Vec::new();
     let mut new_files: BTreeMap<String, String> = BTreeMap::new();
@@ -196,7 +212,7 @@ pub fn install(
         if !visited.insert(project.clone()) {
             continue;
         }
-        let Some(v) = resolve(paths, &project, game, loader)? else {
+        let Some(v) = resolve(paths, &project, game, loaders)? else {
             missing.push(project);
             continue;
         };
@@ -232,7 +248,11 @@ pub fn install(
     if !missing.is_empty() {
         report(
             sink,
-            Progress::Log(format!("  no build for {game}: {}", missing.join(", "))),
+            Progress::Log(format!(
+                "  no {} build for {game}, skipped: {}",
+                loader.label(),
+                missing.join(", ")
+            )),
         );
     }
     // Remove previously managed jars that are no longer wanted / were updated.
@@ -252,6 +272,7 @@ pub fn install(
     );
     crate::download::fetch_all(&tasks, verify, parallel, sink)?;
     managed.game_version = game.to_string();
+    managed.loader = loader.id().to_string();
     managed.files = new_files;
     managed.save(mods_dir)?;
     let mut names: Vec<String> = managed

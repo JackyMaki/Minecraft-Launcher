@@ -1,16 +1,68 @@
-//! Fabric loader installation through meta.fabricmc.net. Writes a version
-//! JSON that `inheritsFrom` the vanilla version, exactly like the official
-//! Fabric installer does.
+//! Fabric-style loaders (Fabric, Quilt, Legacy Fabric). All three publish a
+//! "meta" service with the same shape, and a profile JSON that `inheritsFrom`
+//! the vanilla version, exactly like their official installers produce.
 
 use crate::http;
 use crate::paths::{write_atomic, Paths};
+use crate::profiles::Loader;
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use std::time::Duration;
 
-pub fn meta_base() -> String {
-    std::env::var("MC_LAUNCHER_FABRIC_META_URL")
-        .unwrap_or_else(|_| "https://meta.fabricmc.net/v2".into())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Flavor {
+    pub loader: Loader,
+    /// Version id prefix produced by the official installer.
+    pub prefix: &'static str,
+    pub env_override: &'static str,
+    pub default_base: &'static str,
+    /// Path under the base: `/versions/loader/{game}` lives under this.
+    pub api: &'static str,
+}
+
+pub const FABRIC: Flavor = Flavor {
+    loader: Loader::Fabric,
+    prefix: "fabric-loader-",
+    env_override: "MC_LAUNCHER_FABRIC_META_URL",
+    default_base: "https://meta.fabricmc.net",
+    api: "/v2",
+};
+pub const QUILT: Flavor = Flavor {
+    loader: Loader::Quilt,
+    prefix: "quilt-loader-",
+    env_override: "MC_LAUNCHER_QUILT_META_URL",
+    default_base: "https://meta.quiltmc.org",
+    api: "/v3",
+};
+pub const LEGACY_FABRIC: Flavor = Flavor {
+    loader: Loader::LegacyFabric,
+    prefix: "fabric-loader-",
+    env_override: "MC_LAUNCHER_LEGACYFABRIC_META_URL",
+    default_base: "https://meta.legacyfabric.net",
+    api: "/v2",
+};
+
+impl Flavor {
+    pub fn for_loader(loader: Loader) -> Option<Flavor> {
+        match loader {
+            Loader::Fabric => Some(FABRIC),
+            Loader::Quilt => Some(QUILT),
+            Loader::LegacyFabric => Some(LEGACY_FABRIC),
+            _ => None,
+        }
+    }
+
+    /// Base URL including the API version; an environment override replaces it whole.
+    pub fn meta_base(&self) -> String {
+        match std::env::var(self.env_override) {
+            Ok(v) if !v.trim().is_empty() => v.trim_end_matches('/').to_string(),
+            _ => format!("{}{}", self.default_base, self.api),
+        }
+    }
+
+    pub fn version_id(&self, loader_version: &str, game: &str) -> String {
+        format!("{}{loader_version}-{game}", self.prefix)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,75 +84,82 @@ pub struct GameEntry {
     pub stable: bool,
 }
 
-pub fn version_id(loader: &str, game: &str) -> String {
-    format!("fabric-loader-{loader}-{game}")
-}
-
 /// Loader versions compatible with `game`, newest first.
-pub fn loader_versions(paths: &Paths, game: &str) -> Result<Vec<LoaderEntry>> {
+pub fn loader_versions(paths: &Paths, flavor: Flavor, game: &str) -> Result<Vec<LoaderEntry>> {
     http::get_json_cached(
-        &format!("{}/versions/loader/{game}", meta_base()),
-        &paths.cache_dir().join(format!("fabric_loader_{game}.json")),
+        &format!("{}/versions/loader/{game}", flavor.meta_base()),
+        &paths
+            .cache_dir()
+            .join(format!("{}_loader_{game}.json", flavor.loader.id())),
         Duration::from_secs(6 * 3600),
     )
 }
 
-/// All game versions Fabric supports.
-pub fn game_versions(paths: &Paths) -> Result<Vec<GameEntry>> {
+/// All game versions this loader supports.
+pub fn game_versions(paths: &Paths, flavor: Flavor) -> Result<Vec<GameEntry>> {
     http::get_json_cached(
-        &format!("{}/versions/game", meta_base()),
-        &paths.cache_dir().join("fabric_game.json"),
+        &format!("{}/versions/game", flavor.meta_base()),
+        &paths
+            .cache_dir()
+            .join(format!("{}_game.json", flavor.loader.id())),
         Duration::from_secs(6 * 3600),
     )
 }
 
-/// Already-installed Fabric version id for `game`, if any.
-pub fn installed_for(paths: &Paths, game: &str) -> Option<String> {
+/// Already-installed version id of this flavor for `game`, if any.
+pub fn installed_for(paths: &Paths, flavor: Flavor, game: &str) -> Option<String> {
     let suffix = format!("-{game}");
     let rd = std::fs::read_dir(paths.versions()).ok()?;
     let mut found: Vec<String> = rd
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| n.starts_with("fabric-loader-") && n.ends_with(&suffix))
+        .filter(|n| n.starts_with(flavor.prefix) && n.ends_with(&suffix))
         .filter(|n| paths.version_json(n).is_file())
         .collect();
     found.sort();
     found.pop()
 }
 
-/// Install Fabric for `game` (loader = latest stable unless pinned) and return
-/// the version id. Reuses an existing installation when possible so a warm
-/// launch needs no network.
-pub fn install(paths: &Paths, game: &str, pinned_loader: Option<&str>) -> Result<String> {
-    if let Some(l) = pinned_loader.filter(|s| !s.is_empty()) {
-        let id = version_id(l, game);
+/// Install the loader for `game` (latest stable unless pinned) and return the
+/// version id. Reuses an existing installation so a warm launch needs no network.
+pub fn install(paths: &Paths, flavor: Flavor, game: &str, pinned: Option<&str>) -> Result<String> {
+    let pinned = pinned.filter(|s| !s.trim().is_empty()).map(|s| s.trim());
+    if let Some(l) = pinned {
+        let id = flavor.version_id(l, game);
         if paths.version_json(&id).is_file() {
             return Ok(id);
         }
-    } else if let Some(id) = installed_for(paths, game) {
+    } else if let Some(id) = installed_for(paths, flavor, game) {
         return Ok(id);
     }
-    let loader = match pinned_loader.filter(|s| !s.is_empty()) {
+    let loader_version = match pinned {
         Some(l) => l.to_string(),
         None => {
-            let list = loader_versions(paths, game)?;
+            let list = loader_versions(paths, flavor, game)
+                .with_context(|| format!("fetching {} loader versions", flavor.loader.label()))?;
             list.iter()
                 .find(|e| e.loader.stable)
                 .or_else(|| list.first())
                 .map(|e| e.loader.version.clone())
-                .ok_or_else(|| anyhow!("Fabric does not support Minecraft {game}"))?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "{} does not support Minecraft {game}",
+                        flavor.loader.label()
+                    )
+                })?
         }
     };
     let url = format!(
-        "{}/versions/loader/{game}/{loader}/profile/json",
-        meta_base()
+        "{}/versions/loader/{game}/{loader_version}/profile/json",
+        flavor.meta_base()
     );
-    let text = http::get_string(&url).context("downloading Fabric profile")?;
-    let json: serde_json::Value = serde_json::from_str(&text).context("parsing Fabric profile")?;
+    let text = http::get_string(&url)
+        .with_context(|| format!("downloading {} profile", flavor.loader.label()))?;
+    let json: serde_json::Value = serde_json::from_str(&text).context("parsing loader profile")?;
     let id = json["id"]
         .as_str()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| version_id(&loader, game));
+        .unwrap_or_else(|| flavor.version_id(&loader_version, game));
     write_atomic(&paths.version_json(&id), text.as_bytes())?;
     Ok(id)
 }
