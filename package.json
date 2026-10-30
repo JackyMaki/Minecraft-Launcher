@@ -1,0 +1,14 @@
+{
+  "name": "minecraft-launcher",
+  "version": "0.1.0",
+  "description": "Minecraft launcher with Microsoft account (MSA) login",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "bin": { "mc-login": "bin/login.js" },
+  "scripts": {
+    "login": "node bin/login.js",
+    "logout": "node bin/login.js --logout",
+    "test": "node --test"
+  }
+}
