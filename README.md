@@ -1,6 +1,6 @@
-# Lantern
+# Flint
 
-Lantern is a Minecraft: Java Edition launcher with Microsoft account (MSA) login.
+Flint is a Minecraft: Java Edition launcher with Microsoft account (MSA) login.
 
 ## Microsoft account login
 
