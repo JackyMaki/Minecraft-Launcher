@@ -8,7 +8,7 @@ export function defaultAccountPath() {
     || (process.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'Application Support') : null)
     || process.env.XDG_CONFIG_HOME
     || path.join(os.homedir(), '.config');
-  return path.join(base, 'flint', 'account.json');
+  return path.join(base, 'elo-launcher', 'account.json');
 }
 
 export async function loadAccount(file = defaultAccountPath()) {

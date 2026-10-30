@@ -1,11 +1,11 @@
 {
-  "name": "flint",
+  "name": "elo-launcher",
   "version": "0.1.0",
-  "description": "Flint: a Minecraft launcher with Microsoft account (MSA) login",
+  "description": "Elo Launcher: a Minecraft launcher with Microsoft account (MSA) login",
   "type": "module",
   "license": "MIT",
   "engines": { "node": ">=20" },
-  "bin": { "flint": "bin/login.js" },
+  "bin": { "elo": "bin/login.js" },
   "scripts": {
     "login": "node bin/login.js",
     "logout": "node bin/login.js --logout",
