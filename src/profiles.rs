@@ -401,6 +401,65 @@ pub struct Settings {
     pub keep_open: bool,
     /// Let the launcher download Mojang's Java runtimes.
     pub auto_java: bool,
+    /// CurseForge API key (free at console.curseforge.com); enables the CurseForge catalog.
+    pub curseforge_api_key: String,
+    /// Look and feel of the GUI.
+    pub appearance: Appearance,
+}
+
+/// Everything about how the GUI looks. All fields have sensible defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Appearance {
+    /// Built-in theme name (`dark`, `midnight`, `light`, `grass`, `nether`, `ocean`, `custom`).
+    pub theme: String,
+    /// Accent colour (buttons, highlights), RGB.
+    pub accent: [u8; 3],
+    /// Window background, RGB (custom theme).
+    pub background: [u8; 3],
+    /// Panel / card colour, RGB (custom theme).
+    pub panel: [u8; 3],
+    /// Text colour, RGB (custom theme).
+    pub text: [u8; 3],
+    /// Whole-UI zoom, 0.7 .. 1.6.
+    pub zoom: f32,
+    /// Corner rounding in points, 0 .. 16.
+    pub rounding: u8,
+    /// Optional background picture (PNG/JPEG path).
+    pub background_image: String,
+    /// How much to darken the background picture, 0 .. 100.
+    pub background_dim: u8,
+    /// Profiles list on the right instead of the left.
+    pub sidebar_right: bool,
+    /// Tighter spacing.
+    pub compact: bool,
+    /// Text on the big button.
+    pub play_label: String,
+    /// Show one-line hints next to options.
+    pub show_hints: bool,
+    /// Translucent cards over the background.
+    pub glass: bool,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            theme: "dark".into(),
+            accent: [0x3c, 0x8d, 0x2f],
+            background: [0x16, 0x18, 0x16],
+            panel: [0x22, 0x26, 0x22],
+            text: [0xe6, 0xe6, 0xe6],
+            zoom: 1.0,
+            rounding: 8,
+            background_image: String::new(),
+            background_dim: 55,
+            sidebar_right: false,
+            compact: false,
+            play_label: "PLAY".into(),
+            show_hints: true,
+            glass: true,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -411,6 +470,8 @@ impl Default for Settings {
             verify_on_launch: false,
             keep_open: true,
             auto_java: true,
+            curseforge_api_key: String::new(),
+            appearance: Appearance::default(),
         }
     }
 }

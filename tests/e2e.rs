@@ -1,5 +1,5 @@
 //! End-to-end test: a local mock of Mojang's / Fabric's / Modrinth's servers,
-//! a stand-in "Minecraft" jar, and the real `mclauncher` binary.
+//! a stand-in "Minecraft" jar, and the real `flint` binary.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 fn sha1(data: &[u8]) -> String {
-    minecraft_launcher::download::sha1_hex(data)
+    flint_launcher::download::sha1_hex(data)
 }
 
 fn jar_with_main(main: &str, entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -133,7 +133,7 @@ impl Mock {
 }
 
 fn bin() -> Command {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_mclauncher"));
+    let mut c = Command::new(env!("CARGO_BIN_EXE_flint"));
     for (k, _) in std::env::vars() {
         if k.to_ascii_lowercase().contains("proxy") {
             c.env_remove(k);
@@ -343,7 +343,7 @@ fn populate(mock: &Mock) -> String {
     // Modrinth: every performance mod resolves to a small jar; sodium depends on fabric-api's project id.
     let mod_jar = jar(&[("mod.txt", b"mod")]);
     let (_, mod_sha, mod_size) = mock.put("/mods/generic.jar", mod_jar);
-    for (slug, _) in minecraft_launcher::mods::PERF_MODS {
+    for (slug, _) in flint_launcher::mods::PERF_MODS {
         let project_id = format!("id-{slug}");
         let deps = if *slug == "sodium" {
             serde_json::json!([{"project_id": "id-fabric-api", "dependency_type": "required"}])
@@ -359,6 +359,21 @@ fn populate(mock: &Mock) -> String {
         mock.put(&format!("/modrinth/project/{slug}/version"), bytes.clone());
         mock.put(&format!("/modrinth/project/id-{slug}/version"), bytes);
     }
+
+    // Modrinth search and a CurseForge mod (search, files, download).
+    mock.put("/modrinth/search", serde_json::to_vec(&serde_json::json!({
+        "hits": [{"project_id": "AANobbMI", "project_type": "mod", "slug": "sodium", "author": "jellysquid3", "title": "Sodium", "description": "Fast rendering", "downloads": 50000000, "icon_url": "", "versions": ["mock-1.21"]}],
+        "total_hits": 1
+    })).unwrap());
+    mock.put("/curseforge/mods/search", serde_json::to_vec(&serde_json::json!({
+        "data": [{"id": 238222, "name": "Just Enough Items", "summary": "JEI", "downloadCount": 300000000, "authors": [{"name": "mezz"}], "logo": {"thumbnailUrl": ""}, "links": {"websiteUrl": "https://www.curseforge.com/minecraft/mc-mods/jei"}}],
+        "pagination": {"totalCount": 1}
+    })).unwrap());
+    let cf_jar = jar(&[("jei.txt", b"jei")]);
+    let (_, cf_sha, cf_size) = mock.put("/cfcdn/files/5000/1/jei-1.0.jar", cf_jar);
+    mock.put("/curseforge/mods/238222/files", serde_json::to_vec(&serde_json::json!({
+        "data": [{"id": 5000001, "fileName": "jei-1.0.jar", "fileDate": "2025-01-01T00:00:00Z", "releaseType": 1, "downloadUrl": format!("{}/cfcdn/files/5000/1/jei-1.0.jar", mock.base), "fileLength": cf_size, "hashes": [{"value": cf_sha, "algo": 1}], "dependencies": []}]
+    })).unwrap());
 
     let manifest = serde_json::json!({
         "latest": {"release": "mock-1.21", "snapshot": "mock-1.21"},
@@ -391,6 +406,10 @@ fn env_for(cmd: &mut Command, root: &Path, mock: &Mock, manifest_url: &str) {
         )
         .env("MC_LAUNCHER_QUILT_META_URL", format!("{}/quilt", mock.base))
         .env(
+            "MC_LAUNCHER_CURSEFORGE_URL",
+            format!("{}/curseforge", mock.base),
+        )
+        .env(
             "MC_LAUNCHER_FORGE_FILES_URL",
             format!("{}/forgefiles", mock.base),
         )
@@ -406,9 +425,9 @@ fn env_for(cmd: &mut Command, root: &Path, mock: &Mock, manifest_url: &str) {
 
 fn run(cmd: &mut Command) -> (bool, String) {
     let t = Instant::now();
-    let out = cmd.output().expect("failed to run mclauncher");
+    let out = cmd.output().expect("failed to run flint");
     eprintln!(
-        "mclauncher {:?} took {:?}",
+        "flint {:?} took {:?}",
         cmd.get_args().take(3).collect::<Vec<_>>(),
         t.elapsed()
     );
@@ -463,7 +482,7 @@ fn install_launch_quickplay_fabric_and_warm_start() {
     assert_eq!(arg_after(&args, "--username").as_deref(), Some("Steve"));
     assert_eq!(
         arg_after(&args, "--uuid").as_deref(),
-        Some(&minecraft_launcher::auth::offline_uuid("Steve")[..])
+        Some(&flint_launcher::auth::offline_uuid("Steve")[..])
     );
     assert_eq!(
         arg_after(&args, "--quickPlaySingleplayer").as_deref(),
@@ -595,7 +614,7 @@ fn install_launch_quickplay_fabric_and_warm_start() {
         .collect();
     assert_eq!(
         mods.len(),
-        minecraft_launcher::mods::PERF_MODS.len(),
+        flint_launcher::mods::PERF_MODS.len(),
         "{mods:?}"
     );
     assert!(mods.contains(&"sodium-1.0.jar".to_string()));
@@ -647,11 +666,10 @@ fn install_launch_quickplay_fabric_and_warm_start() {
     assert!(root
         .join("versions/quilt-loader-0.27.0-mock-1.21/quilt-loader-0.27.0-mock-1.21.json")
         .is_file());
-    assert!(root.join("mods/.launcher_mods.json").is_file());
-    let managed: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(root.join("mods/.launcher_mods.json")).unwrap(),
-    )
-    .unwrap();
+    assert!(root.join(".flint_mods.json").is_file());
+    let managed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join(".flint_mods.json")).unwrap())
+            .unwrap();
     assert_eq!(managed["loader"], "quilt");
 
     // 4c. Forge profile: runs the (mock) official installer headlessly, keeps our profiles file.
@@ -707,6 +725,57 @@ fn install_launch_quickplay_fabric_and_warm_start() {
     let (ok, out) = run(c.args(["launch", "Forgey", "--offline", "Steve", "--dry-run"]));
     assert!(ok, "{out}");
     assert!(!out.contains("Running Forge installer"), "{out}");
+
+    // 4d. Catalog search (Modrinth and CurseForge) and a CurseForge mod added to the Fabric profile.
+    let mut c = bin();
+    env_for(&mut c, &root, &mock, &manifest_url);
+    let (ok, out) = run(c.args([
+        "search",
+        "sodium",
+        "--version",
+        "mock-1.21",
+        "--loader",
+        "fabric",
+    ]));
+    assert!(ok, "{out}");
+    assert!(out.contains("Sodium") && out.contains("sodium"), "{out}");
+    let mut c = bin();
+    env_for(&mut c, &root, &mock, &manifest_url);
+    let (ok, out) = run(c.args(["search", "jei", "--curseforge"]));
+    assert!(
+        !ok && out.contains("API key"),
+        "CurseForge without a key must explain: {out}"
+    );
+    let mut c = bin();
+    env_for(&mut c, &root, &mock, &manifest_url);
+    let (ok, out) = run(c.args(["settings", "curseforge_api_key=test-key"]));
+    assert!(ok, "{out}");
+    let mut c = bin();
+    env_for(&mut c, &root, &mock, &manifest_url);
+    let (ok, out) = run(c.args(["search", "jei", "--curseforge", "--loader", "fabric"]));
+    assert!(ok, "{out}");
+    assert!(out.contains("curseforge:mod:238222"), "{out}");
+    let mut c = bin();
+    env_for(&mut c, &root, &mock, &manifest_url);
+    let (ok, out) = run(c.args(["mods", "Fast", "cf:238222"]));
+    assert!(ok, "{out}");
+    assert!(
+        root.join("mods/jei-1.0.jar").is_file(),
+        "CurseForge file installed: {out}"
+    );
+    let managed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join(".flint_mods.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        managed["files"]["curseforge:mod:238222"],
+        "mods/jei-1.0.jar"
+    );
+    // Switching the profile back to the Fabric mod set keeps the CurseForge file on launch (fast path).
+    let mut c = bin();
+    env_for(&mut c, &root, &mock, &manifest_url);
+    let (ok, out) = run(c.args(["launch", "Fast", "--offline", "Steve", "--dry-run"]));
+    assert!(ok, "{out}");
+    assert!(root.join("mods/jei-1.0.jar").is_file());
 
     // 5. Warm start with the network gone: dry-run must succeed quickly without any request.
     mock.stop();

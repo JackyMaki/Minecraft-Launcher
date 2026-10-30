@@ -44,20 +44,20 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: mclauncher
-            name: mclauncher-linux-x86_64
+            artifact: flint
+            name: flint-linux-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: mclauncher.exe
-            name: mclauncher-windows-x86_64.exe
+            artifact: flint.exe
+            name: flint-windows-x86_64.exe
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact: mclauncher
-            name: mclauncher-macos-arm64
+            artifact: flint
+            name: flint-macos-arm64
           - os: macos-13
             target: x86_64-apple-darwin
-            artifact: mclauncher
-            name: mclauncher-macos-x86_64
+            artifact: flint
+            name: flint-macos-x86_64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

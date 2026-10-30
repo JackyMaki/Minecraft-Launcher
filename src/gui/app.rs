@@ -1,9 +1,11 @@
-use crate::auth::{Account, Accounts};
+use super::browser::{Action as BrowserAction, Browser};
+use super::theme::{self, Palette, THEMES};
+use crate::auth::{Account, AccountKind, Accounts};
 use crate::java::JavaInfo;
 use crate::manifest::VersionManifest;
 use crate::paths::Paths;
 use crate::perf::PerfPreset;
-use crate::profiles::{Loader, Profile, Profiles, QuickPlay, Resolution, Settings};
+use crate::profiles::{Appearance, Loader, Profile, Profiles, QuickPlay, Resolution, Settings};
 use crate::session::{self, Overrides};
 use crate::Progress;
 use anyhow::Result;
@@ -13,22 +15,18 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-const ACCENT: Color32 = Color32::from_rgb(0x3c, 0x8d, 0x2f);
-const ACCENT_HOVER: Color32 = Color32::from_rgb(0x4c, 0xa8, 0x3a);
-const DANGER: Color32 = Color32::from_rgb(0xc0, 0x39, 0x2b);
-
 pub fn run(paths: Paths) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1040.0, 660.0])
-            .with_min_inner_size([780.0, 520.0])
-            .with_title("Minecraft Launcher")
+            .with_inner_size([1080.0, 680.0])
+            .with_min_inner_size([800.0, 540.0])
+            .with_title(crate::APP_TITLE)
             .with_icon(std::sync::Arc::new(icon())),
         persist_window: true,
         ..Default::default()
     };
     eframe::run_native(
-        "Minecraft Launcher",
+        crate::APP_TITLE,
         options,
         Box::new(move |cc| Ok(Box::new(App::new(cc, paths)))),
     )
@@ -62,6 +60,9 @@ struct App {
     manifest: Option<VersionManifest>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
+    pal: Palette,
+    applied: Appearance,
+    browser: Browser,
 
     // background work
     busy: bool,
@@ -91,6 +92,7 @@ struct App {
 
     // dialogs
     show_settings: bool,
+    show_appearance: bool,
     show_accounts: bool,
     show_new_profile: bool,
     new_profile_name: String,
@@ -102,6 +104,7 @@ struct App {
     java_loading: bool,
 
     dirty_at: Option<Instant>,
+    settings_dirty_at: Option<Instant>,
     started: Instant,
     first_frame_logged: bool,
 }
@@ -109,9 +112,10 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, paths: Paths) -> Self {
         let started = Instant::now();
-        style(&cc.egui_ctx);
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         let _ = std::fs::create_dir_all(paths.cache_dir());
         let settings = Settings::load(&paths);
+        let pal = theme::apply(&cc.egui_ctx, &settings.appearance);
         let mut profiles = Profiles::load(&paths).unwrap_or_default();
         if profiles.ensure_defaults() {
             let _ = profiles.save(&paths);
@@ -119,8 +123,6 @@ impl App {
         let accounts = Accounts::load(&paths);
         let manifest = VersionManifest::load_cached(&paths);
         let (tx, rx) = mpsc::channel();
-
-        // Refresh the manifest in the background; the UI shows the cache meanwhile.
         {
             let tx = tx.clone();
             let paths = paths.clone();
@@ -131,7 +133,7 @@ impl App {
                 ctx.request_repaint();
             });
         }
-
+        let applied = settings.appearance.clone();
         let mut app = Self {
             paths,
             settings,
@@ -140,6 +142,9 @@ impl App {
             manifest,
             tx,
             rx,
+            pal,
+            applied,
+            browser: Browser::default(),
             busy: false,
             phase: String::new(),
             step: (0, 0),
@@ -161,6 +166,7 @@ impl App {
             worlds_dir: None,
             editing_key: None,
             show_settings: false,
+            show_appearance: false,
             show_accounts: false,
             show_new_profile: false,
             new_profile_name: String::new(),
@@ -171,18 +177,54 @@ impl App {
             java_list: Vec::new(),
             java_loading: false,
             dirty_at: None,
+            settings_dirty_at: None,
             started,
             first_frame_logged: false,
         };
         app.sync_editors();
+        // Undocumented: open a window at start-up (used for screenshots and UI checks).
+        match std::env::var("FLINT_OPEN_WINDOW").as_deref() {
+            Ok("appearance") => app.show_appearance = true,
+            Ok("settings") => app.show_settings = true,
+            Ok("accounts") => app.show_accounts = true,
+            Ok("mods") => {
+                if let Some(p) = app.selected_profile().cloned() {
+                    let gv = app.game_version_of(&p);
+                    let key = app.settings.curseforge_api_key.clone();
+                    app.browser.open_for(&cc.egui_ctx, &p, &gv, &key);
+                }
+            }
+            _ => {}
+        }
         app
     }
+
+    // ------------------------------------------------------------ helpers
 
     fn selected_profile(&self) -> Option<&Profile> {
         self.profiles.selected()
     }
 
-    /// Copy profile fields into the editor scratch strings.
+    fn game_version_of(&self, p: &Profile) -> String {
+        self.manifest
+            .as_ref()
+            .map(|m| m.resolve_alias(&p.official.last_version_id).to_string())
+            .unwrap_or_else(|| p.official.last_version_id.clone())
+    }
+
+    fn has_bg_image(&self) -> bool {
+        !self.settings.appearance.background_image.trim().is_empty()
+    }
+
+    fn surface(&self, base: Color32) -> Color32 {
+        theme::surface(
+            &self.pal,
+            &self.settings.appearance,
+            self.has_bg_image(),
+            base,
+        )
+    }
+
     fn sync_editors(&mut self) {
         let Some(p) = self.selected_profile().cloned() else {
             return;
@@ -216,13 +258,24 @@ impl App {
         self.dirty_at = Some(Instant::now());
     }
 
-    fn save_if_due(&mut self) {
+    fn save_if_due(&mut self, ctx: &egui::Context) {
         if let Some(t) = self.dirty_at {
             if t.elapsed() > Duration::from_millis(400) {
                 self.dirty_at = None;
                 if let Err(e) = self.profiles.save(&self.paths) {
                     self.error = Some(format!("Could not save profiles: {e:#}"));
                 }
+            }
+        }
+        if self.applied != self.settings.appearance {
+            self.pal = theme::apply(ctx, &self.settings.appearance);
+            self.applied = self.settings.appearance.clone();
+            self.settings_dirty_at = Some(Instant::now());
+        }
+        if let Some(t) = self.settings_dirty_at {
+            if t.elapsed() > Duration::from_millis(600) {
+                self.settings_dirty_at = None;
+                let _ = self.settings.save(&self.paths);
             }
         }
     }
@@ -247,6 +300,9 @@ impl App {
                 Msg::Progress(Progress::Done) => {
                     self.busy = false;
                     self.phase.clear();
+                    if self.status.is_empty() {
+                        self.status = "Done".into();
+                    }
                 }
                 Msg::Progress(Progress::Failed(e)) => {
                     self.busy = false;
@@ -284,7 +340,7 @@ impl App {
                 Msg::Manifest(Err(e)) => {
                     self.push_log(format!("version manifest: {e:#}"));
                     if self.manifest.is_none() {
-                        self.error = Some("Could not fetch the version list (offline?). Already installed versions still launch; see the log for details.".into());
+                        self.error = Some("Could not fetch the version list (offline?). Installed versions still launch; see the log.".into());
                     } else {
                         self.status = "Offline: using cached version list".into();
                     }
@@ -315,6 +371,20 @@ impl App {
         }
     }
 
+    /// Forward a Progress channel into the UI message channel.
+    fn forwarder(&self, ctx: &egui::Context) -> (crate::ProgressSink, std::thread::JoinHandle<()>) {
+        let (ptx, prx) = mpsc::channel::<Progress>();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        let h = std::thread::spawn(move || {
+            for p in prx {
+                let _ = tx.send(Msg::Progress(p));
+                ctx.request_repaint();
+            }
+        });
+        (Some(ptx), h)
+    }
+
     fn play(&mut self, ctx: &egui::Context) {
         let Some(profile) = self.selected_profile().cloned() else {
             self.error = Some("Select or create a profile first.".into());
@@ -341,19 +411,9 @@ impl App {
         let manifest = self.manifest.clone();
         let mut accounts = self.accounts.clone();
         let tx = self.tx.clone();
-        let ctx = ctx.clone();
+        let ctx2 = ctx.clone();
+        let (sink, fwd) = self.forwarder(ctx);
         std::thread::spawn(move || {
-            let (ptx, prx) = mpsc::channel::<Progress>();
-            let sink = Some(ptx);
-            // Forward progress to the UI.
-            let fwd_tx = tx.clone();
-            let fwd_ctx = ctx.clone();
-            let forwarder = std::thread::spawn(move || {
-                for p in prx {
-                    let _ = fwd_tx.send(Msg::Progress(p));
-                    fwd_ctx.request_repaint();
-                }
-            });
             let result = (|| -> Result<std::process::Child> {
                 let account =
                     session::fresh_account(&paths, &settings, &mut accounts, &account_id, &sink)?;
@@ -375,19 +435,72 @@ impl App {
             match result {
                 Ok(child) => {
                     let _ = tx.send(Msg::GameStarted(child.id()));
-                    ctx.request_repaint();
+                    ctx2.request_repaint();
                     let code = session::pump_output(child, sink.clone()).unwrap_or(-1);
                     drop(sink);
-                    let _ = forwarder.join();
+                    let _ = fwd.join();
                     let _ = tx.send(Msg::GameExited(code));
                 }
                 Err(e) => {
                     drop(sink);
-                    let _ = forwarder.join();
+                    let _ = fwd.join();
                     let _ = tx.send(Msg::Progress(Progress::Failed(format!("{e:#}"))));
                 }
             }
-            ctx.request_repaint();
+            ctx2.request_repaint();
+        });
+    }
+
+    /// Download the selected profile's mods right now (from the mod browser).
+    fn install_mods_now(&mut self, ctx: &egui::Context) {
+        let Some(profile) = self.selected_profile().cloned() else {
+            return;
+        };
+        if !profile.extra.loader.is_modded() {
+            self.error = Some("Pick a mod loader for this profile first.".into());
+            return;
+        }
+        let _ = self.profiles.save(&self.paths);
+        self.busy = true;
+        self.error = None;
+        self.status.clear();
+        self.phase = "Resolving mods".into();
+        let paths = self.paths.clone();
+        let settings = self.settings.clone();
+        let game = self.game_version_of(&profile);
+        let tx = self.tx.clone();
+        let ctx2 = ctx.clone();
+        let (sink, fwd) = self.forwarder(ctx);
+        std::thread::spawn(move || {
+            let mut refs: Vec<String> = Vec::new();
+            if profile.extra.perf_mods {
+                refs.extend(crate::mods::PERF_MODS.iter().map(|(s, _)| s.to_string()));
+            }
+            refs.extend(profile.extra.extra_mods.iter().cloned());
+            let r = crate::mods::install(
+                &paths,
+                &profile.game_dir(&paths),
+                &refs,
+                &game,
+                profile.extra.loader,
+                &settings.curseforge_api_key,
+                false,
+                settings.parallel_downloads,
+                &sink,
+            );
+            let msg = match r {
+                Ok(files) => Progress::Log(format!("{} file(s) in place", files.len())),
+                Err(e) => Progress::Failed(format!("{e:#}")),
+            };
+            let ok = !matches!(msg, Progress::Failed(_));
+            crate::report(&sink, msg);
+            if ok {
+                crate::report(&sink, Progress::Done);
+            }
+            drop(sink);
+            let _ = fwd.join();
+            let _ = tx.send(Msg::Progress(Progress::Log(String::new())));
+            ctx2.request_repaint();
         });
     }
 
@@ -435,31 +548,94 @@ impl App {
         });
     }
 
-    // ---------------------------------------------------------------- UI
+    // ------------------------------------------------------------ background
+
+    fn paint_background(&self, ctx: &egui::Context) {
+        let rect = ctx.screen_rect();
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        painter.rect_filled(rect, 0.0, self.pal.bg);
+        if !self.has_bg_image() {
+            return;
+        }
+        let path = self.settings.appearance.background_image.trim();
+        let uri = if path.starts_with("file://") {
+            path.to_string()
+        } else {
+            format!("file://{path}")
+        };
+        if let Ok(egui::load::TexturePoll::Ready { texture }) = ctx.try_load_texture(
+            &uri,
+            egui::TextureOptions::LINEAR,
+            egui::load::SizeHint::Size(2048, 2048),
+        ) {
+            // "cover" fit: crop the image so it fills the window.
+            let img = texture.size;
+            let scale = (rect.width() / img.x).max(rect.height() / img.y);
+            let shown = egui::vec2(
+                rect.width() / (img.x * scale),
+                rect.height() / (img.y * scale),
+            );
+            let uv_min = egui::pos2((1.0 - shown.x) / 2.0, (1.0 - shown.y) / 2.0);
+            let uv = egui::Rect::from_min_size(uv_min, shown);
+            painter.image(texture.id, rect, uv, Color32::WHITE);
+            let dim = (self.settings.appearance.background_dim as f32 / 100.0 * 255.0) as u8;
+            let veil = if self.pal.dark {
+                Color32::from_black_alpha(dim)
+            } else {
+                Color32::from_white_alpha(dim)
+            };
+            painter.rect_filled(rect, 0.0, veil);
+        }
+    }
+
+    // ------------------------------------------------------------ UI
 
     fn top_bar(&mut self, ctx: &egui::Context) {
+        let fill = self.surface(if self.pal.dark {
+            self.pal.panel.gamma_multiply(0.9)
+        } else {
+            self.pal.panel
+        });
         let frame = egui::Frame::new()
-            .fill(Color32::from_rgb(0x14, 0x1c, 0x14))
+            .fill(fill)
             .inner_margin(egui::Margin::symmetric(14, 8));
         egui::TopBottomPanel::top("top")
             .frame(frame)
             .show(ctx, |ui| {
-                ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
-                    paint_block(ui.painter(), rect);
+                        ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+                    paint_block(ui.painter(), rect, self.pal.accent_hover);
+                    ui.label(RichText::new(crate::APP_TITLE).size(22.0).strong());
                     ui.label(
-                        RichText::new("Minecraft Launcher")
-                            .size(20.0)
-                            .strong()
-                            .color(Color32::from_rgb(0xe8, 0xf0, 0xe0)),
+                        RichText::new(format!("v{}", crate::LAUNCHER_VERSION))
+                            .weak()
+                            .small(),
                     );
-                    ui.label(RichText::new(format!("v{}", crate::LAUNCHER_VERSION)).weak());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("⚙ Settings").clicked() {
                             self.show_settings = true;
                         }
+                        if ui.button("🎨 Appearance").clicked() {
+                            self.show_appearance = true;
+                        }
+                        let modded = self
+                            .selected_profile()
+                            .map(|p| p.extra.loader.is_modded())
+                            .unwrap_or(false);
+                        if ui
+                            .add_enabled(modded, egui::Button::new("⬇ Mods"))
+                            .on_hover_text("Browse Modrinth and CurseForge")
+                            .on_disabled_hover_text("Pick a mod loader in the profile first")
+                            .clicked()
+                        {
+                            if let Some(p) = self.selected_profile().cloned() {
+                                let gv = self.game_version_of(&p);
+                                let key = self.settings.curseforge_api_key.clone();
+                                self.browser.open_for(ctx, &p, &gv, &key);
+                            }
+                        }
+                        ui.separator();
                         let acc_label = self
                             .accounts
                             .selected()
@@ -472,8 +648,8 @@ impl App {
                                 for a in &self.accounts.accounts {
                                     let sel = self.accounts.selected.as_deref() == Some(&a.id);
                                     let kind = match a.kind {
-                                        crate::auth::AccountKind::Microsoft => "Microsoft",
-                                        crate::auth::AccountKind::Offline => "offline",
+                                        AccountKind::Microsoft => "Microsoft",
+                                        AccountKind::Offline => "offline",
                                     };
                                     if ui
                                         .selectable_label(sel, format!("{} ({kind})", a.username))
@@ -493,22 +669,27 @@ impl App {
                             });
                     });
                 });
-                ui.add_space(4.0);
             });
     }
 
     fn side_panel(&mut self, ctx: &egui::Context) {
+        let fill = self.surface(self.pal.panel);
         let frame = egui::Frame::new()
-            .fill(Color32::from_rgb(0x1a, 0x1e, 0x1a))
-            .inner_margin(egui::Margin::symmetric(8, 6));
-        egui::SidePanel::left("profiles")
-            .resizable(false)
-            .exact_width(250.0)
+            .fill(fill)
+            .inner_margin(egui::Margin::symmetric(8, 8));
+        let panel = if self.settings.appearance.sidebar_right {
+            egui::SidePanel::right("profiles")
+        } else {
+            egui::SidePanel::left("profiles")
+        };
+        panel
+            .resizable(true)
+            .default_width(250.0)
+            .width_range(200.0..=360.0)
             .frame(frame)
             .show(ctx, |ui| {
-                ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.heading("Profiles");
+                    ui.label(RichText::new("Profiles").size(17.0).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("+ New").clicked() {
                             self.show_new_profile = true;
@@ -516,65 +697,76 @@ impl App {
                         }
                     });
                 });
-                ui.separator();
+                ui.add_space(4.0);
                 let mut pick: Option<String> = None;
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for p in &self.profiles.profiles {
-                        let selected = self.profiles.selected.as_deref() == Some(&p.key);
-                        let version = self
-                            .manifest
-                            .as_ref()
-                            .map(|m| m.resolve_alias(&p.official.last_version_id).to_string())
-                            .unwrap_or_else(|| p.official.last_version_id.clone());
-                        let color = match p.extra.loader {
-                            Loader::Vanilla => ACCENT_HOVER,
-                            Loader::Fabric | Loader::LegacyFabric => {
-                                Color32::from_rgb(0xdb, 0xb7, 0x6c)
+                let card = self.surface(self.pal.card);
+                let r = self.settings.appearance.rounding as f32;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for p in &self.profiles.profiles {
+                            let selected = self.profiles.selected.as_deref() == Some(&p.key);
+                            let version = self
+                                .manifest
+                                .as_ref()
+                                .map(|m| m.resolve_alias(&p.official.last_version_id).to_string())
+                                .unwrap_or_else(|| p.official.last_version_id.clone());
+                            let color = loader_color(p.extra.loader, &self.pal);
+                            let qp = match &p.extra.quick_play {
+                                QuickPlay::None => String::new(),
+                                QuickPlay::Singleplayer { world } => format!("  ▶ {world}"),
+                                QuickPlay::Multiplayer { address } => format!("  ▶ {address}"),
+                                QuickPlay::Realms { .. } => "  ▶ Realm".into(),
+                            };
+                            let fill = if selected {
+                                self.pal.accent.gamma_multiply(0.55)
+                            } else {
+                                card
+                            };
+                            let frame = egui::Frame::new()
+                                .fill(fill)
+                                .corner_radius(r)
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .stroke(egui::Stroke::new(
+                                    1.0_f32,
+                                    if selected {
+                                        self.pal.accent
+                                    } else {
+                                        self.pal.stroke
+                                    },
+                                ));
+                            let resp = frame
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        let (dot, _) = ui.allocate_exact_size(
+                                            egui::vec2(12.0, 12.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().circle_filled(dot.center(), 5.0, color);
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                RichText::new(p.display_name()).strong().size(15.0),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!("{version}{qp}"))
+                                                    .small()
+                                                    .color(self.pal.weak),
+                                            );
+                                        });
+                                    });
+                                })
+                                .response
+                                .interact(egui::Sense::click());
+                            if resp.clicked() {
+                                pick = Some(p.key.clone());
                             }
-                            Loader::Quilt => Color32::from_rgb(0xc7, 0x7d, 0xff),
-                            Loader::Forge => Color32::from_rgb(0x5c, 0x8a, 0xd6),
-                            Loader::NeoForge => Color32::from_rgb(0xf1, 0x8a, 0x3c),
-                        };
-                        let qp = match &p.extra.quick_play {
-                            QuickPlay::None => String::new(),
-                            QuickPlay::Singleplayer { world } => format!("  ▶ {world}"),
-                            QuickPlay::Multiplayer { address } => format!("  ▶ {address}"),
-                            QuickPlay::Realms { .. } => "  ▶ Realm".into(),
-                        };
-                        let mut job = egui::text::LayoutJob::default();
-                        let font = egui::FontId::proportional(14.0);
-                        let small = egui::FontId::proportional(12.0);
-                        let text_color = ui.visuals().text_color();
-                        job.append(
-                            &format!("     {}", p.display_name()),
-                            0.0,
-                            egui::TextFormat {
-                                font_id: font,
-                                color: text_color,
-                                ..Default::default()
-                            },
-                        );
-                        job.append(
-                            &format!("\n     {version}{qp}"),
-                            0.0,
-                            egui::TextFormat {
-                                font_id: small,
-                                color: text_color.gamma_multiply(0.7),
-                                ..Default::default()
-                            },
-                        );
-                        let resp = ui
-                            .with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                                ui.selectable_label(selected, job)
-                            })
-                            .inner;
-                        let dot = resp.rect.left_center() + egui::vec2(12.0, 0.0);
-                        ui.painter().circle_filled(dot, 5.0, color);
-                        if resp.clicked() {
-                            pick = Some(p.key.clone());
+                            if resp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            ui.add_space(2.0);
                         }
-                    }
-                });
+                    });
                 if let Some(k) = pick {
                     self.profiles.selected = Some(k);
                     self.editing_key = None;
@@ -649,7 +841,6 @@ impl App {
                         } else {
                             ui.label("Version list not loaded yet…");
                         }
-                        // Installed custom versions (Forge, OptiFine, manual installs...)
                         if let Ok(rd) = std::fs::read_dir(self.paths.versions()) {
                             let mut customs: Vec<String> = rd
                                 .flatten()
@@ -661,7 +852,11 @@ impl App {
                                         .map(|m| m.get(n).is_none())
                                         .unwrap_or(true)
                                 })
-                                .filter(|n| !n.starts_with("fabric-loader-"))
+                                .filter(|n| {
+                                    !n.starts_with("fabric-loader-")
+                                        && !n.starts_with("quilt-loader-")
+                                        && !n.contains("forge")
+                                })
                                 .collect();
                             customs.sort();
                             if !customs.is_empty() {
@@ -679,7 +874,7 @@ impl App {
 
     fn central(&mut self, ctx: &egui::Context) {
         let bg = egui::Frame::new()
-            .fill(Color32::from_rgb(0x22, 0x26, 0x22))
+            .fill(Color32::TRANSPARENT)
             .inner_margin(egui::Margin::same(12));
         egui::CentralPanel::default().frame(bg).show(ctx, |ui| {
             let Some(key) = self.profiles.selected.clone() else {
@@ -688,238 +883,230 @@ impl App {
             };
             let Some(mut p) = self.profiles.get(&key).cloned() else { return };
             let mut changed = false;
-
+            let hints = self.settings.appearance.show_hints;
+            let accent = self.pal.accent_hover;
             let card = egui::Frame::new()
-                .fill(ui.visuals().panel_fill)
-                .corner_radius(10.0)
-                .inner_margin(egui::Margin::same(16))
-                .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(0x33, 0x3a, 0x33)));
+                .fill(self.surface(self.pal.panel))
+                .corner_radius(self.settings.appearance.rounding as f32 + 2.0)
+                .inner_margin(egui::Margin::same(18))
+                .stroke(egui::Stroke::new(1.0_f32, self.pal.stroke));
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-              card.show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                // Name
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Name").strong().color(ACCENT_HOVER));
-                    let mut name = p.display_name();
-                    let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(300.0));
-                    if r.changed() {
-                        p.official.name = name;
-                        changed = true;
+                card.show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    // Name + delete
+                    ui.horizontal(|ui| {
+                        let mut name = p.display_name();
+                        let r = ui.add(egui::TextEdit::singleline(&mut name).font(egui::TextStyle::Heading).desired_width(320.0));
+                        if r.changed() {
+                            p.official.name = name;
+                            changed = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(RichText::new("🗑 Delete").color(Color32::WHITE)).fill(self.pal.danger.gamma_multiply(0.7))).clicked() {
+                                self.profiles.remove(&key);
+                                self.editing_key = None;
+                                self.mark_dirty();
+                            }
+                        });
+                    });
+                    if !self.profiles.profiles.iter().any(|x| x.key == key) {
+                        return;
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new("🗑 Delete").fill(DANGER.gamma_multiply(0.6))).clicked() {
-                            self.profiles.remove(&key);
-                            self.editing_key = None;
-                            self.mark_dirty();
+                    ui.add_space(10.0);
+
+                    section(ui, "Version", accent);
+                    ui.horizontal(|ui| {
+                        let mut v = p.official.last_version_id.clone();
+                        if self.version_picker(ui, &mut v) {
+                            p.official.last_version_id = v;
+                            changed = true;
                         }
                     });
-                });
-                if !self.profiles.profiles.iter().any(|x| x.key == key) {
-                    return;
-                }
-                ui.add_space(8.0);
+                    ui.add_space(8.0);
 
-                // Version
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Version").strong().color(ACCENT_HOVER));
-                    let mut v = p.official.last_version_id.clone();
-                    if self.version_picker(ui, &mut v) {
-                        p.official.last_version_id = v;
-                        changed = true;
-                    }
-                });
-                ui.add_space(8.0);
-
-                // Loader
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Loader").strong().color(ACCENT_HOVER));
-                    egui::ComboBox::from_id_salt("loader")
-                        .selected_text(p.extra.loader.label())
-                        .show_ui(ui, |ui| {
+                    section(ui, "Mod loader", accent);
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("loader").selected_text(p.extra.loader.label()).show_ui(ui, |ui| {
                             for l in Loader::ALL {
-                                changed |= ui
-                                    .selectable_value(&mut p.extra.loader, l, l.label())
-                                    .on_hover_text(l.hint())
-                                    .clicked();
+                                changed |= ui.selectable_value(&mut p.extra.loader, l, l.label()).on_hover_text(l.hint()).clicked();
                             }
                         });
-                    ui.label(RichText::new(p.extra.loader.hint()).weak());
-                });
-                if p.extra.loader.is_modded() {
-                    ui.indent("modded", |ui| {
-                        changed |= ui
-                            .checkbox(&mut p.extra.perf_mods, "Install the performance pack (Sodium, Lithium, C2ME, ModernFix, …)")
-                            .on_hover_text(format!(
-                                "Mods without a {} build are skipped automatically.\n\n{}",
-                                p.extra.loader.label(),
-                                crate::mods::PERF_MODS.iter().map(|(s, d)| format!("{s}: {d}")).collect::<Vec<_>>().join("\n")
-                            ))
-                            .changed();
-                        ui.horizontal(|ui| {
-                            ui.label("Extra Modrinth mods:");
-                            let r = ui.add(
-                                egui::TextEdit::singleline(&mut self.extra_mods_text)
-                                    .hint_text("iris, zoomify, …")
-                                    .desired_width(300.0),
-                            );
-                            if r.changed() {
-                                p.extra.extra_mods = self
-                                    .extra_mods_text
-                                    .split(',')
-                                    .filter_map(|s| crate::mods::validate_slug(s).ok())
-                                    .collect();
-                                changed = true;
-                            }
-                        });
+                        if hints {
+                            ui.label(RichText::new(p.extra.loader.hint()).weak());
+                        }
                     });
-                }
-                ui.add_space(8.0);
+                    if p.extra.loader.is_modded() {
+                        ui.indent("modded", |ui| {
+                            changed |= ui
+                                .checkbox(&mut p.extra.perf_mods, "Performance pack (Sodium, Lithium, C2ME, ModernFix, …)")
+                                .on_hover_text(format!(
+                                    "Mods without a {} build are skipped automatically.\n\n{}",
+                                    p.extra.loader.label(),
+                                    crate::mods::PERF_MODS.iter().map(|(s, d)| format!("{s}: {d}")).collect::<Vec<_>>().join("\n")
+                                ))
+                                .changed();
+                            ui.horizontal(|ui| {
+                                let n = p.extra.extra_mods.len();
+                                ui.label(format!("{n} extra mod{} from the catalog", if n == 1 { "" } else { "s" }));
+                                if ui.add(egui::Button::new(RichText::new("⬇ Browse mods").color(self.pal.on_accent)).fill(self.pal.accent)).clicked() {
+                                    let gv = self.game_version_of(&p);
+                                    let key = self.settings.curseforge_api_key.clone();
+                                    self.browser.open_for(ctx, &p, &gv, &key);
+                                }
+                                ui.menu_button("by id…", |ui| {
+                                    ui.label("Modrinth slugs or curseforge:mod:ID, comma separated");
+                                    let r = ui.add(egui::TextEdit::singleline(&mut self.extra_mods_text).desired_width(320.0));
+                                    if r.changed() {
+                                        p.extra.extra_mods = self.extra_mods_text.split(',').filter_map(|s| crate::mods::validate_slug(s).ok()).collect();
+                                        changed = true;
+                                    }
+                                });
+                            });
+                        });
+                    }
+                    ui.add_space(8.0);
 
-                // Performance
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Performance").strong().color(ACCENT_HOVER));
-                    egui::ComboBox::from_id_salt("preset")
-                        .selected_text(p.extra.perf.label())
-                        .show_ui(ui, |ui| {
+                    section(ui, "Performance", accent);
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("preset").selected_text(p.extra.perf.label()).show_ui(ui, |ui| {
                             for pr in PerfPreset::ALL {
                                 changed |= ui.selectable_value(&mut p.extra.perf, pr, pr.label()).clicked();
                             }
                         });
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Memory");
-                    let auto = crate::perf::heap_mb(p.extra.perf, None, p.extra.loader.is_modded());
-                    let total = crate::perf::total_memory_mb();
-                    let r = ui.add(
-                        egui::Slider::new(&mut p.extra.memory_mb, 0..=total.min(32768))
-                            .step_by(256.0)
-                            .custom_formatter(move |v, _| if v < 512.0 { format!("Auto ({auto} MiB)") } else { format!("{v:.0} MiB") })
-                            .custom_parser(|s| s.trim_end_matches(" MiB").parse::<f64>().ok()),
-                    );
-                    if r.changed() {
-                        if p.extra.memory_mb < 512 {
-                            p.extra.memory_mb = 0;
+                        ui.label("Memory");
+                        let auto = crate::perf::heap_mb(p.extra.perf, None, p.extra.loader.is_modded());
+                        let total = crate::perf::total_memory_mb();
+                        let r = ui.add(
+                            egui::Slider::new(&mut p.extra.memory_mb, 0..=total.min(32768))
+                                .step_by(256.0)
+                                .custom_formatter(move |v, _| if v < 512.0 { format!("Auto ({auto} MiB)") } else { format!("{v:.0} MiB") })
+                                .custom_parser(|s| s.trim_end_matches(" MiB").parse::<f64>().ok()),
+                        );
+                        if r.changed() {
+                            if p.extra.memory_mb < 512 {
+                                p.extra.memory_mb = 0;
+                            }
+                            changed = true;
                         }
-                        changed = true;
-                    }
-                });
-                ui.add_space(8.0);
+                    });
+                    ui.add_space(8.0);
 
-                // Quick Play
-                ui.label(RichText::new("Quick Play (skip the menus)").strong().color(ACCENT_HOVER));
-                ui.horizontal(|ui| {
-                    let mut k = self.qp_kind;
-                    ui.radio_value(&mut k, QpKind::None, "Main menu");
-                    ui.radio_value(&mut k, QpKind::World, "Singleplayer world");
-                    ui.radio_value(&mut k, QpKind::Server, "Server");
-                    ui.radio_value(&mut k, QpKind::Realm, "Realm");
-                    if k != self.qp_kind {
-                        self.qp_kind = k;
-                        self.qp_text.clear();
-                        changed = true;
+                    section(ui, "Quick Play", accent);
+                    if hints {
+                        ui.label(RichText::new("Skip every menu: the game opens straight into a world, a server or a Realm.").weak());
                     }
-                });
-                match self.qp_kind {
-                    QpKind::None => {}
-                    QpKind::World => {
-                        ui.horizontal(|ui| {
-                            ui.label("World:");
-                            egui::ComboBox::from_id_salt("world")
-                                .width(260.0)
-                                .selected_text(if self.qp_text.is_empty() { "choose a world…" } else { &self.qp_text })
-                                .show_ui(ui, |ui| {
-                                    if self.worlds.is_empty() {
-                                        ui.label("No worlds found in this game directory yet.");
-                                    }
-                                    for w in self.worlds.clone() {
-                                        if ui.selectable_label(self.qp_text == w, &w).clicked() {
-                                            self.qp_text = w;
-                                            changed = true;
+                    ui.horizontal(|ui| {
+                        let mut k = self.qp_kind;
+                        ui.selectable_value(&mut k, QpKind::None, "Main menu");
+                        ui.selectable_value(&mut k, QpKind::World, "Singleplayer world");
+                        ui.selectable_value(&mut k, QpKind::Server, "Server");
+                        ui.selectable_value(&mut k, QpKind::Realm, "Realm");
+                        if k != self.qp_kind {
+                            self.qp_kind = k;
+                            self.qp_text.clear();
+                            changed = true;
+                        }
+                    });
+                    match self.qp_kind {
+                        QpKind::None => {}
+                        QpKind::World => {
+                            ui.horizontal(|ui| {
+                                ui.label("World:");
+                                egui::ComboBox::from_id_salt("world")
+                                    .width(260.0)
+                                    .selected_text(if self.qp_text.is_empty() { "choose a world…" } else { &self.qp_text })
+                                    .show_ui(ui, |ui| {
+                                        if self.worlds.is_empty() {
+                                            ui.label("No worlds found in this game directory yet.");
                                         }
-                                    }
-                                });
-                            if ui.add(egui::TextEdit::singleline(&mut self.qp_text).hint_text("or type the save folder name").desired_width(220.0)).changed() {
-                                changed = true;
-                            }
-                        });
-                    }
-                    QpKind::Server => {
-                        ui.horizontal(|ui| {
-                            ui.label("Server:");
-                            if ui.add(egui::TextEdit::singleline(&mut self.qp_text).hint_text("play.example.net:25565").desired_width(260.0)).changed() {
-                                changed = true;
-                            }
-                            if !self.servers.is_empty() {
-                                egui::ComboBox::from_id_salt("servers").selected_text("saved servers").show_ui(ui, |ui| {
-                                    for (name, ip) in self.servers.clone() {
-                                        if ui.selectable_label(false, format!("{name}  ({ip})")).clicked() {
-                                            self.qp_text = ip;
-                                            changed = true;
+                                        for w in self.worlds.clone() {
+                                            if ui.selectable_label(self.qp_text == w, &w).clicked() {
+                                                self.qp_text = w;
+                                                changed = true;
+                                            }
                                         }
-                                    }
-                                });
-                            }
-                        });
+                                    });
+                                if ui.add(egui::TextEdit::singleline(&mut self.qp_text).hint_text("or type the save folder name").desired_width(220.0)).changed() {
+                                    changed = true;
+                                }
+                            });
+                        }
+                        QpKind::Server => {
+                            ui.horizontal(|ui| {
+                                ui.label("Server:");
+                                if ui.add(egui::TextEdit::singleline(&mut self.qp_text).hint_text("play.example.net:25565").desired_width(260.0)).changed() {
+                                    changed = true;
+                                }
+                                if !self.servers.is_empty() {
+                                    egui::ComboBox::from_id_salt("servers").selected_text("saved servers").show_ui(ui, |ui| {
+                                        for (name, ip) in self.servers.clone() {
+                                            if ui.selectable_label(false, format!("{name}  ({ip})")).clicked() {
+                                                self.qp_text = ip;
+                                                changed = true;
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                        QpKind::Realm => {
+                            ui.horizontal(|ui| {
+                                ui.label("Realm id:");
+                                if ui.add(egui::TextEdit::singleline(&mut self.qp_text).desired_width(200.0)).changed() {
+                                    changed = true;
+                                }
+                            });
+                        }
                     }
-                    QpKind::Realm => {
-                        ui.horizontal(|ui| {
-                            ui.label("Realm id:");
-                            if ui.add(egui::TextEdit::singleline(&mut self.qp_text).desired_width(200.0)).changed() {
-                                changed = true;
-                            }
-                        });
+                    if changed {
+                        let t = self.qp_text.trim().to_string();
+                        p.extra.quick_play = match (self.qp_kind, t.is_empty()) {
+                            (QpKind::None, _) | (_, true) => QuickPlay::None,
+                            (QpKind::World, false) => QuickPlay::Singleplayer { world: t },
+                            (QpKind::Server, false) => QuickPlay::Multiplayer { address: t },
+                            (QpKind::Realm, false) => QuickPlay::Realms { id: t },
+                        };
                     }
-                }
-                if changed {
-                    let t = self.qp_text.trim().to_string();
-                    p.extra.quick_play = match (self.qp_kind, t.is_empty()) {
-                        (QpKind::None, _) | (_, true) => QuickPlay::None,
-                        (QpKind::World, false) => QuickPlay::Singleplayer { world: t },
-                        (QpKind::Server, false) => QuickPlay::Multiplayer { address: t },
-                        (QpKind::Realm, false) => QuickPlay::Realms { id: t },
-                    };
-                }
-                ui.add_space(8.0);
+                    ui.add_space(8.0);
 
-                // Advanced
-                egui::CollapsingHeader::new("Advanced").show(ui, |ui| {
-                    egui::Grid::new("adv").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                        ui.label("Game directory");
-                        let mut gd = p.official.game_dir.clone().unwrap_or_default();
-                        if ui.add(egui::TextEdit::singleline(&mut gd).hint_text(self.paths.root.to_string_lossy()).desired_width(420.0)).changed() {
-                            p.official.game_dir = if gd.trim().is_empty() { None } else { Some(gd) };
-                            self.worlds_dir = None;
-                            changed = true;
-                        }
-                        ui.end_row();
-                        ui.label("Java executable");
-                        let mut jd = p.official.java_dir.clone().unwrap_or_default();
-                        if ui.add(egui::TextEdit::singleline(&mut jd).hint_text("automatic (Mojang runtime)").desired_width(420.0)).changed() {
-                            p.official.java_dir = if jd.trim().is_empty() { None } else { Some(jd) };
-                            changed = true;
-                        }
-                        ui.end_row();
-                        ui.label("Extra JVM arguments");
-                        let mut ja = p.official.java_args.clone().unwrap_or_default();
-                        if ui.add(egui::TextEdit::singleline(&mut ja).hint_text("-Dfoo=bar").desired_width(420.0)).changed() {
-                            p.official.java_args = if ja.trim().is_empty() { None } else { Some(ja) };
-                            changed = true;
-                        }
-                        ui.end_row();
-                        ui.label("Window size");
-                        if ui.add(egui::TextEdit::singleline(&mut self.resolution_text).hint_text("1920x1080").desired_width(140.0)).changed() {
-                            p.official.resolution = parse_res(&self.resolution_text);
-                            changed = true;
-                        }
-                        ui.end_row();
-                        ui.label("Loader version");
-                        if ui.add(egui::TextEdit::singleline(&mut p.extra.loader_version).hint_text("latest stable / recommended").desired_width(200.0)).changed() {
-                            changed = true;
-                        }
-                        ui.end_row();
+                    egui::CollapsingHeader::new(RichText::new("Advanced").strong()).show(ui, |ui| {
+                        egui::Grid::new("adv").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                            ui.label("Game directory");
+                            let mut gd = p.official.game_dir.clone().unwrap_or_default();
+                            if ui.add(egui::TextEdit::singleline(&mut gd).hint_text(self.paths.root.to_string_lossy()).desired_width(420.0)).changed() {
+                                p.official.game_dir = if gd.trim().is_empty() { None } else { Some(gd) };
+                                self.worlds_dir = None;
+                                changed = true;
+                            }
+                            ui.end_row();
+                            ui.label("Java executable");
+                            let mut jd = p.official.java_dir.clone().unwrap_or_default();
+                            if ui.add(egui::TextEdit::singleline(&mut jd).hint_text("automatic (Mojang runtime)").desired_width(420.0)).changed() {
+                                p.official.java_dir = if jd.trim().is_empty() { None } else { Some(jd) };
+                                changed = true;
+                            }
+                            ui.end_row();
+                            ui.label("Extra JVM arguments");
+                            let mut ja = p.official.java_args.clone().unwrap_or_default();
+                            if ui.add(egui::TextEdit::singleline(&mut ja).hint_text("-Dfoo=bar").desired_width(420.0)).changed() {
+                                p.official.java_args = if ja.trim().is_empty() { None } else { Some(ja) };
+                                changed = true;
+                            }
+                            ui.end_row();
+                            ui.label("Window size");
+                            if ui.add(egui::TextEdit::singleline(&mut self.resolution_text).hint_text("1920x1080").desired_width(140.0)).changed() {
+                                p.official.resolution = parse_res(&self.resolution_text);
+                                changed = true;
+                            }
+                            ui.end_row();
+                            ui.label("Loader version");
+                            if ui.add(egui::TextEdit::singleline(&mut p.extra.loader_version).hint_text("latest stable / recommended").desired_width(200.0)).changed() {
+                                changed = true;
+                            }
+                            ui.end_row();
+                        });
                     });
                 });
-              });
             });
 
             if changed {
@@ -936,33 +1123,37 @@ impl App {
     }
 
     fn bottom(&mut self, ctx: &egui::Context) {
+        let fill = self.surface(self.pal.panel);
         let frame = egui::Frame::new()
-            .fill(Color32::from_rgb(0x1a, 0x1e, 0x1a))
+            .fill(fill)
             .inner_margin(egui::Margin::symmetric(14, 10));
         egui::TopBottomPanel::bottom("bottom")
             .frame(frame)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let can_play = !self.busy && self.profiles.selected.is_some();
-                    let label = if self.busy {
-                        "…"
+                    let label = self.settings.appearance.play_label.trim();
+                    let label = if label.is_empty() { "PLAY" } else { label };
+                    let text = if self.busy {
+                        "…".to_string()
                     } else if self.game_pid.is_some() {
-                        "▶ PLAY AGAIN"
+                        format!("▶ {label} AGAIN")
                     } else {
-                        "▶ PLAY"
+                        format!("▶ {label}")
                     };
                     let btn = egui::Button::new(
-                        RichText::new(label)
+                        RichText::new(text)
                             .size(22.0)
                             .strong()
-                            .color(Color32::WHITE),
+                            .color(self.pal.on_accent),
                     )
                     .fill(if can_play {
-                        ACCENT
+                        self.pal.accent
                     } else {
-                        ACCENT.gamma_multiply(0.4)
+                        self.pal.accent.gamma_multiply(0.4)
                     })
-                    .min_size(egui::vec2(220.0, 48.0));
+                    .corner_radius(self.settings.appearance.rounding as f32 + 2.0)
+                    .min_size(egui::vec2(230.0, 54.0));
                     if ui
                         .add_enabled(can_play, btn)
                         .on_hover_text("Install anything missing and start the game")
@@ -983,9 +1174,14 @@ impl App {
                             } else {
                                 self.phase.clone()
                             };
-                            ui.add(egui::ProgressBar::new(frac).text(text).animate(total == 0));
+                            ui.add(
+                                egui::ProgressBar::new(frac)
+                                    .text(text)
+                                    .animate(total == 0)
+                                    .fill(self.pal.accent),
+                            );
                         } else if let Some(e) = &self.error {
-                            ui.colored_label(DANGER, format!("⚠ {e}"));
+                            ui.colored_label(self.pal.danger, format!("⚠ {e}"));
                         } else if !self.status.is_empty() {
                             ui.label(&self.status);
                         } else {
@@ -1035,8 +1231,169 @@ impl App {
                             );
                         });
                 }
-                ui.add_space(6.0);
             });
+    }
+
+    fn appearance_window(&mut self, ctx: &egui::Context) {
+        if !self.show_appearance {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Appearance")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                let a = &mut self.settings.appearance;
+                ui.label(RichText::new("Theme").strong());
+                ui.horizontal_wrapped(|ui| {
+                    for (id, label) in THEMES {
+                        let preview = theme::palette(&Appearance {
+                            theme: id.to_string(),
+                            ..a.clone()
+                        });
+                        let btn = egui::Button::new(RichText::new(*label).color(preview.text))
+                            .fill(preview.panel)
+                            .stroke(egui::Stroke::new(
+                                if a.theme == *id { 2.0_f32 } else { 1.0_f32 },
+                                if a.theme == *id {
+                                    preview.accent
+                                } else {
+                                    preview.stroke
+                                },
+                            ));
+                        if ui.add(btn).clicked() {
+                            a.theme = id.to_string();
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                egui::Grid::new("appearance")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Accent colour");
+                        ui.horizontal(|ui| {
+                            let mut c = Color32::from_rgb(a.accent[0], a.accent[1], a.accent[2]);
+                            if egui::color_picker::color_edit_button_srgba(
+                                ui,
+                                &mut c,
+                                egui::color_picker::Alpha::Opaque,
+                            )
+                            .changed()
+                            {
+                                a.accent = [c.r(), c.g(), c.b()];
+                            }
+                            for (name, col) in [
+                                ("Grass", [0x3c, 0x8d, 0x2f]),
+                                ("Diamond", [0x2b, 0xb3, 0xc0]),
+                                ("Lapis", [0x3f, 0x6c, 0xe0]),
+                                ("Redstone", [0xd9, 0x3a, 0x2b]),
+                                ("Gold", [0xe0, 0xa8, 0x1e]),
+                                ("Amethyst", [0x9a, 0x5c, 0xe0]),
+                                ("Ender", [0x1c, 0xb3, 0x8a]),
+                            ] {
+                                let btn = egui::Button::new("  ")
+                                    .fill(Color32::from_rgb(col[0], col[1], col[2]))
+                                    .min_size(egui::vec2(20.0, 20.0));
+                                if ui.add(btn).on_hover_text(name).clicked() {
+                                    a.accent = col;
+                                }
+                            }
+                        });
+                        ui.end_row();
+                        if a.theme == "custom" {
+                            ui.label("Background colour");
+                            let mut c = Color32::from_rgb(
+                                a.background[0],
+                                a.background[1],
+                                a.background[2],
+                            );
+                            if egui::color_picker::color_edit_button_srgba(
+                                ui,
+                                &mut c,
+                                egui::color_picker::Alpha::Opaque,
+                            )
+                            .changed()
+                            {
+                                a.background = [c.r(), c.g(), c.b()];
+                            }
+                            ui.end_row();
+                            ui.label("Panel colour");
+                            let mut c = Color32::from_rgb(a.panel[0], a.panel[1], a.panel[2]);
+                            if egui::color_picker::color_edit_button_srgba(
+                                ui,
+                                &mut c,
+                                egui::color_picker::Alpha::Opaque,
+                            )
+                            .changed()
+                            {
+                                a.panel = [c.r(), c.g(), c.b()];
+                            }
+                            ui.end_row();
+                            ui.label("Text colour");
+                            let mut c = Color32::from_rgb(a.text[0], a.text[1], a.text[2]);
+                            if egui::color_picker::color_edit_button_srgba(
+                                ui,
+                                &mut c,
+                                egui::color_picker::Alpha::Opaque,
+                            )
+                            .changed()
+                            {
+                                a.text = [c.r(), c.g(), c.b()];
+                            }
+                            ui.end_row();
+                        }
+                        ui.label("UI size");
+                        ui.add(
+                            egui::Slider::new(&mut a.zoom, 0.7..=1.6)
+                                .step_by(0.05)
+                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                        );
+                        ui.end_row();
+                        ui.label("Corner rounding");
+                        ui.add(egui::Slider::new(&mut a.rounding, 0..=16));
+                        ui.end_row();
+                        ui.label("Layout");
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut a.compact, "Compact");
+                            ui.checkbox(&mut a.sidebar_right, "Profiles on the right");
+                            ui.checkbox(&mut a.show_hints, "Show hints");
+                        });
+                        ui.end_row();
+                        ui.label("Play button text");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut a.play_label)
+                                .desired_width(160.0)
+                                .hint_text("PLAY"),
+                        );
+                        ui.end_row();
+                        ui.label("Background picture");
+                        ui.vertical(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut a.background_image)
+                                    .desired_width(300.0)
+                                    .hint_text("path to a .png or .jpg"),
+                            );
+                            ui.horizontal(|ui| {
+                                ui.label("Darken");
+                                ui.add(
+                                    egui::Slider::new(&mut a.background_dim, 0..=100).suffix("%"),
+                                );
+                                ui.checkbox(&mut a.glass, "Glass panels");
+                            });
+                        });
+                        ui.end_row();
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Reset to defaults").clicked() {
+                        *a = Appearance::default();
+                    }
+                    ui.label(RichText::new("Changes apply instantly and are saved.").weak());
+                });
+            });
+        self.show_appearance = open;
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -1056,11 +1413,9 @@ impl App {
                             create = true;
                         }
                     });
-                    ui.horizontal(|ui| {
-                        if ui.button("Create").clicked() {
-                            create = true;
-                        }
-                    });
+                    if ui.button("Create").clicked() {
+                        create = true;
+                    }
                 });
             if create {
                 let name = if self.new_profile_name.trim().is_empty() {
@@ -1124,8 +1479,8 @@ impl App {
                     ui.horizontal(|ui| {
                         let sel = self.accounts.selected.as_deref() == Some(&a.id);
                         let kind = match a.kind {
-                            crate::auth::AccountKind::Microsoft => "Microsoft",
-                            crate::auth::AccountKind::Offline => "offline",
+                            AccountKind::Microsoft => "Microsoft",
+                            AccountKind::Offline => "offline",
                         };
                         ui.label(format!("{}{}  ({kind}, {})", if sel { "● " } else { "○ " }, a.username, a.uuid_dashed()));
                         if ui.small_button("remove").clicked() {
@@ -1149,13 +1504,17 @@ impl App {
             let mut open = true;
             let mut changed = false;
             let mut detect = false;
-            egui::Window::new("Settings").open(&mut open).collapsible(false).default_width(520.0).show(ctx, |ui| {
+            egui::Window::new("Settings").open(&mut open).collapsible(false).default_width(540.0).show(ctx, |ui| {
                 egui::Grid::new("settings").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                     ui.label("Game directory");
                     ui.label(self.paths.root.to_string_lossy());
                     ui.end_row();
-                    ui.label("Microsoft client id").on_hover_text("Azure app registration id approved for the Minecraft API. See README → Microsoft login.");
-                    changed |= ui.add(egui::TextEdit::singleline(&mut self.settings.msa_client_id).desired_width(320.0).hint_text("00000000-0000-0000-0000-000000000000")).changed();
+                    ui.label("Microsoft client id").on_hover_text("Only needed when this build has no id baked in. See README → Microsoft login.");
+                    let hint = if crate::auth::BUILT_IN_CLIENT_ID.is_some() { "built in (leave empty)" } else { "00000000-0000-0000-0000-000000000000" };
+                    changed |= ui.add(egui::TextEdit::singleline(&mut self.settings.msa_client_id).desired_width(320.0).hint_text(hint)).changed();
+                    ui.end_row();
+                    ui.label("CurseForge API key").on_hover_text("Free: console.curseforge.com → API keys. Enables the CurseForge catalog in the mod browser.");
+                    changed |= ui.add(egui::TextEdit::singleline(&mut self.settings.curseforge_api_key).desired_width(320.0).password(true).hint_text("optional")).changed();
                     ui.end_row();
                     ui.label("Parallel downloads");
                     changed |= ui.add(egui::Slider::new(&mut self.settings.parallel_downloads, 1..=64)).changed();
@@ -1191,6 +1550,34 @@ impl App {
             }
             self.show_settings = open;
         }
+
+        // Mod browser
+        if self.browser.open {
+            if let Some(key) = self.profiles.selected.clone() {
+                let gv = self
+                    .selected_profile()
+                    .map(|p| self.game_version_of(p))
+                    .unwrap_or_default();
+                let cf = self.settings.curseforge_api_key.clone();
+                let pal = self.pal;
+                let mut install_now = false;
+                if let Some(p) = self.profiles.get_mut(&key) {
+                    match self.browser.show(ctx, &pal, p, &gv, &cf) {
+                        BrowserAction::None => {}
+                        BrowserAction::Changed => {
+                            self.extra_mods_text = p.extra.extra_mods.join(", ");
+                            self.dirty_at = Some(Instant::now());
+                        }
+                        BrowserAction::InstallNow => install_now = true,
+                    }
+                }
+                if install_now {
+                    self.install_mods_now(ctx);
+                }
+            } else {
+                self.browser.open = false;
+            }
+        }
     }
 }
 
@@ -1205,25 +1592,58 @@ impl eframe::App for App {
         }
         self.poll(ctx);
         self.sync_editors();
+        self.paint_background(ctx);
         self.top_bar(ctx);
         self.side_panel(ctx);
         self.bottom(ctx);
         self.central(ctx);
+        self.appearance_window(ctx);
         self.dialogs(ctx);
-        self.save_if_due();
-        if self.busy || self.login_in_progress || self.dirty_at.is_some() {
+        self.save_if_due(ctx);
+        if self.busy
+            || self.login_in_progress
+            || self.dirty_at.is_some()
+            || self.settings_dirty_at.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        let c = self.pal.bg;
+        [
+            c.r() as f32 / 255.0,
+            c.g() as f32 / 255.0,
+            c.b() as f32 / 255.0,
+            1.0,
+        ]
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if self.dirty_at.is_some() {
             let _ = self.profiles.save(&self.paths);
         }
+        if self.settings_dirty_at.is_some() {
+            let _ = self.settings.save(&self.paths);
+        }
     }
 }
 
-/// A little grass block, drawn procedurally so we need no image decoder.
+fn section(ui: &mut egui::Ui, title: &str, accent: Color32) {
+    ui.label(RichText::new(title).strong().size(15.0).color(accent));
+}
+
+fn loader_color(l: Loader, pal: &Palette) -> Color32 {
+    match l {
+        Loader::Vanilla => pal.accent_hover,
+        Loader::Fabric | Loader::LegacyFabric => Color32::from_rgb(0xdb, 0xb7, 0x6c),
+        Loader::Quilt => Color32::from_rgb(0xc7, 0x7d, 0xff),
+        Loader::Forge => Color32::from_rgb(0x5c, 0x8a, 0xd6),
+        Loader::NeoForge => Color32::from_rgb(0xf1, 0x8a, 0x3c),
+    }
+}
+
+/// A little grass block, drawn procedurally so we need no image decoder at start-up.
 fn icon() -> egui::IconData {
     const N: usize = 64;
     let mut rgba = vec![0u8; N * N * 4];
@@ -1264,19 +1684,19 @@ fn icon() -> egui::IconData {
 }
 
 /// Tiny grass block glyph used next to the title.
-fn paint_block(painter: &egui::Painter, rect: egui::Rect) {
+fn paint_block(painter: &egui::Painter, rect: egui::Rect, grass: Color32) {
     let r = rect.shrink(2.0);
-    painter.rect_filled(r, 3.0, Color32::from_rgb(0x79, 0x55, 0x3a));
+    painter.rect_filled(r, 4.0, Color32::from_rgb(0x79, 0x55, 0x3a));
     let top = egui::Rect::from_min_size(r.min, egui::vec2(r.width(), r.height() * 0.38));
     painter.rect_filled(
         top,
         egui::CornerRadius {
-            nw: 3,
-            ne: 3,
+            nw: 4,
+            ne: 4,
             sw: 0,
             se: 0,
         },
-        ACCENT_HOVER,
+        grass,
     );
 }
 
@@ -1287,20 +1707,4 @@ fn parse_res(s: &str) -> Option<Resolution> {
         width: w.trim().parse().ok()?,
         height: h.trim().parse().ok()?,
     })
-}
-
-fn style(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.selection.bg_fill = ACCENT.gamma_multiply(0.7);
-    visuals.widgets.hovered.bg_fill = ACCENT_HOVER.gamma_multiply(0.3);
-    visuals.window_corner_radius = 8.0.into();
-    visuals.widgets.noninteractive.corner_radius = 6.0.into();
-    visuals.widgets.inactive.corner_radius = 6.0.into();
-    visuals.widgets.hovered.corner_radius = 6.0.into();
-    visuals.widgets.active.corner_radius = 6.0.into();
-    ctx.set_visuals(visuals);
-    let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    style.spacing.button_padding = egui::vec2(10.0, 5.0);
-    ctx.set_style(style);
 }

@@ -18,6 +18,7 @@ pub struct InstallOptions {
     pub parallel: usize,
     pub auto_java: bool,
     pub java_override: Option<PathBuf>,
+    pub curseforge_key: String,
 }
 
 impl From<&Settings> for InstallOptions {
@@ -27,6 +28,7 @@ impl From<&Settings> for InstallOptions {
             parallel: s.parallel_downloads,
             auto_java: s.auto_java,
             java_override: None,
+            curseforge_key: s.curseforge_api_key.clone(),
         }
     }
 }
@@ -259,10 +261,11 @@ pub fn prepare_profile(
     if !slugs.is_empty() {
         crate::mods::install(
             paths,
-            &game_dir.join("mods"),
+            &game_dir,
             &slugs,
             &base_id,
             loader,
+            &opts.curseforge_key,
             opts.verify,
             opts.parallel,
             sink,

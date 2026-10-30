@@ -2,19 +2,19 @@
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use minecraft_launcher::auth::{Account, Accounts};
-use minecraft_launcher::manifest::VersionManifest;
-use minecraft_launcher::paths::Paths;
-use minecraft_launcher::perf::PerfPreset;
-use minecraft_launcher::profiles::{Loader, Profile, Profiles, QuickPlay, Resolution, Settings};
-use minecraft_launcher::session::{self, Overrides};
-use minecraft_launcher::{Progress, ProgressSink};
+use flint_launcher::auth::{Account, Accounts};
+use flint_launcher::manifest::VersionManifest;
+use flint_launcher::paths::Paths;
+use flint_launcher::perf::PerfPreset;
+use flint_launcher::profiles::{Loader, Profile, Profiles, QuickPlay, Resolution, Settings};
+use flint_launcher::session::{self, Overrides};
+use flint_launcher::{Progress, ProgressSink};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "mclauncher", version, about = "Fast open-source Minecraft launcher", long_about = None)]
+#[command(name = "flint", version, about = "Flint: a fast open-source Minecraft launcher", long_about = None)]
 struct Cli {
     /// Game directory (defaults to the standard .minecraft folder).
     #[arg(long, global = true, env = "MC_LAUNCHER_ROOT")]
@@ -91,9 +91,28 @@ enum Cmd {
         /// Modrinth project slugs (e.g. sodium iris). Empty = performance pack.
         slugs: Vec<String>,
     },
+    /// Search the mod catalog (Modrinth, or CurseForge with --curseforge).
+    Search {
+        /// Words to search for (empty = most popular).
+        query: Vec<String>,
+        /// Minecraft version filter, e.g. 1.21.1.
+        #[arg(long)]
+        version: Option<String>,
+        /// Loader filter: fabric, quilt, forge, neoforge.
+        #[arg(long)]
+        loader: Option<String>,
+        /// Search resource packs or shaders instead of mods: mod | resourcepack | shader
+        #[arg(long, default_value = "mod")]
+        kind: String,
+        /// Use CurseForge (needs `settings curseforge_api_key=...`).
+        #[arg(long)]
+        curseforge: bool,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
     /// Show or change launcher settings.
     Settings {
-        /// `key=value` pairs: msa_client_id, parallel_downloads, verify_on_launch, keep_open, auto_java
+        /// `key=value` pairs: msa_client_id, curseforge_api_key, parallel_downloads, verify_on_launch, keep_open, auto_java
         set: Vec<String>,
     },
 }
@@ -247,7 +266,7 @@ fn main() {
 fn run(cli: Cli, paths: Paths) -> Result<()> {
     let _ = std::fs::create_dir_all(paths.cache_dir());
     match cli.cmd.unwrap_or(Cmd::Gui) {
-        Cmd::Gui => minecraft_launcher::gui::run(paths),
+        Cmd::Gui => flint_launcher::gui::run(paths),
         Cmd::Versions {
             snapshots,
             all,
@@ -297,11 +316,11 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
             let manifest = load_manifest(&paths, false).ok();
             let mut p = Profile::new("install", &version);
             p.extra.loader = parse_loader(loader.as_deref(), fabric)?;
-            let mut opts = minecraft_launcher::install::InstallOptions::from(&settings);
+            let mut opts = flint_launcher::install::InstallOptions::from(&settings);
             opts.verify = verify;
             let (tx, rx) = mpsc::channel();
             let printer = spawn_printer(rx);
-            let res = minecraft_launcher::install::prepare_profile(
+            let res = flint_launcher::install::prepare_profile(
                 &paths,
                 manifest.as_ref(),
                 &p,
@@ -330,15 +349,15 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
                 return Ok(());
             }
             let settings = Settings::load(&paths);
-            let client_id = minecraft_launcher::auth::msa_client_id(Some(&settings.msa_client_id))?;
-            let dc = minecraft_launcher::auth::begin_device_code(&client_id)?;
+            let client_id = flint_launcher::auth::msa_client_id(Some(&settings.msa_client_id))?;
+            let dc = flint_launcher::auth::begin_device_code(&client_id)?;
             println!(
                 "Open {} and enter the code: {}",
                 dc.verification_uri, dc.user_code
             );
             let _ = open::that(&dc.verification_uri);
-            let tokens = minecraft_launcher::auth::wait_device_code(&client_id, &dc)?;
-            let acc = minecraft_launcher::auth::complete_login(tokens)?;
+            let tokens = flint_launcher::auth::wait_device_code(&client_id, &dc)?;
+            let acc = flint_launcher::auth::complete_login(tokens)?;
             println!("signed in as {} ({})", acc.username, acc.uuid_dashed());
             accounts.upsert(acc);
             accounts.save(&paths)?;
@@ -371,7 +390,7 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
             Ok(())
         }
         Cmd::Java => {
-            for j in minecraft_launcher::java::discover(&paths) {
+            for j in flint_launcher::java::discover(&paths) {
                 println!("Java {:<3} {:<20} {}", j.major, j.version, j.path.display());
             }
             Ok(())
@@ -418,14 +437,14 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
             let mut all: Vec<String> = Vec::new();
             if slugs.is_empty() || p.extra.perf_mods {
                 all.extend(
-                    minecraft_launcher::mods::PERF_MODS
+                    flint_launcher::mods::PERF_MODS
                         .iter()
                         .map(|(s, _)| s.to_string()),
                 );
             }
             let mut extra = p.extra.extra_mods.clone();
             for s in &slugs {
-                let s = minecraft_launcher::mods::validate_slug(s)?;
+                let s = flint_launcher::mods::validate_slug(s)?;
                 if !extra.contains(&s) {
                     extra.push(s.clone());
                 }
@@ -435,12 +454,13 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
             }
             let (tx, rx) = mpsc::channel();
             let printer = spawn_printer(rx);
-            let res = minecraft_launcher::mods::install(
+            let res = flint_launcher::mods::install(
                 &paths,
-                &p.game_dir(&paths).join("mods"),
+                &p.game_dir(&paths),
                 &all,
                 &game,
                 p.extra.loader,
+                &settings.curseforge_api_key,
                 false,
                 settings.parallel_downloads,
                 &Some(tx),
@@ -454,6 +474,43 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
             println!("{} mod file(s) in place", files.len());
             Ok(())
         }
+        Cmd::Search {
+            query,
+            version,
+            loader,
+            kind,
+            curseforge,
+            limit,
+        } => {
+            use flint_launcher::mods::{Kind, SearchQuery};
+            let settings = Settings::load(&paths);
+            let kind = match kind.to_ascii_lowercase().as_str() {
+                "mod" | "mods" => Kind::Mod,
+                "resourcepack" | "rp" | "resourcepacks" => Kind::ResourcePack,
+                "shader" | "shaders" => Kind::Shader,
+                other => return Err(anyhow!("unknown kind '{other}'")),
+            };
+            let q = SearchQuery {
+                text: query.join(" "),
+                kind,
+                loader: parse_loader(loader.as_deref(), false)?,
+                game_version: version.unwrap_or_default(),
+                offset: 0,
+                limit,
+            };
+            let page = if curseforge {
+                flint_launcher::mods::search_curseforge(&q, &settings.curseforge_api_key)?
+            } else {
+                flint_launcher::mods::search_modrinth(&q)?
+            };
+            println!("{} result(s), showing {}:", page.total, page.hits.len());
+            for h in &page.hits {
+                println!("{:<40} {:>10} dl  {}", h.reference, h.downloads, h.title);
+                println!("{:<40}               {}", "", truncate(&h.description, 90));
+            }
+            println!("\nAdd one to a profile:  flint mods <profile> <reference>");
+            Ok(())
+        }
         Cmd::Settings { set } => {
             let mut s = Settings::load(&paths);
             for kv in &set {
@@ -462,6 +519,7 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
                     .ok_or_else(|| anyhow!("expected key=value, got '{kv}'"))?;
                 match k {
                     "msa_client_id" => s.msa_client_id = v.to_string(),
+                    "curseforge_api_key" => s.curseforge_api_key = v.to_string(),
                     "parallel_downloads" => {
                         s.parallel_downloads = v.parse().context("parallel_downloads")?
                     }
@@ -480,6 +538,15 @@ fn run(cli: Cli, paths: Paths) -> Result<()> {
             println!("game directory: {}", paths.root.display());
             Ok(())
         }
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    let s = s.replace('\n', " ");
+    if s.chars().count() <= n {
+        s
+    } else {
+        format!("{}…", s.chars().take(n).collect::<String>())
     }
 }
 
@@ -587,7 +654,7 @@ fn launch(paths: &Paths, a: LaunchArgs) -> Result<()> {
         }
         (None, None) => profiles
             .selected()
-            .ok_or_else(|| anyhow!("no profile selected; run `mclauncher profile add ...`"))?
+            .ok_or_else(|| anyhow!("no profile selected; run `flint profile add ...`"))?
             .clone(),
     };
     if let Some(v) = &a.version {
@@ -605,9 +672,10 @@ fn launch(paths: &Paths, a: LaunchArgs) -> Result<()> {
     let account = if let Some(name) = &a.offline {
         Account::offline(name.trim())
     } else {
-        let id = accounts.selected.clone().ok_or_else(|| {
-            anyhow!("no account. Run `mclauncher login` or use `--offline <name>`")
-        })?;
+        let id = accounts
+            .selected
+            .clone()
+            .ok_or_else(|| anyhow!("no account. Run `flint login` or use `--offline <name>`"))?;
         session::fresh_account(paths, &settings, &mut accounts, &id, &sink)?
     };
 

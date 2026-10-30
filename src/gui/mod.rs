@@ -3,6 +3,10 @@
 
 #[cfg(feature = "gui")]
 mod app;
+#[cfg(feature = "gui")]
+mod browser;
+#[cfg(feature = "gui")]
+mod theme;
 
 #[cfg(feature = "gui")]
 pub fn run(paths: crate::paths::Paths) -> anyhow::Result<()> {

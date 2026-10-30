@@ -10,7 +10,7 @@ use std::time::Duration;
 
 pub fn user_agent() -> String {
     format!(
-        "JackyMaki/Minecraft-Launcher/{} (https://github.com/JackyMaki/Minecraft-Launcher)",
+        "JackyMaki/Flint/{} (https://github.com/JackyMaki/Minecraft-Launcher)",
         crate::LAUNCHER_VERSION
     )
 }
